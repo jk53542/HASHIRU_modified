@@ -142,6 +142,8 @@ class ToolManager:
             )
             toolType = types.Tool(function_declarations=[function])
             toolsList.append(toolType)
+        # @@ DEBUGGING CALL
+        # print(toolsList)
         return toolsList
     
     def delete_tool(self, toolName, toolFile):

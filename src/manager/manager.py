@@ -49,6 +49,7 @@ class GeminiManager:
                  modes: List[Mode] = []):
         self.input_tokens = 0
         self.output_tokens = 0
+        self.logger = logging.getLogger("GeminiManager")
         load_dotenv()
         self.budget_manager = BudgetManager()
 

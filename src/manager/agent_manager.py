@@ -13,9 +13,19 @@ from groq import Groq
 import os
 from dotenv import load_dotenv
 from src.manager.budget_manager import BudgetManager
+import logging
+import time
+
+# @@ inside src/manager/agent_manager.py
+from src.manager.tool_manager import ToolManager  # if ToolManager is importable here
+# OR direct import of metrics wrapper:
+# from src.metrics.semantic_metrics import compute_semantic_entropy, compute_semantic_density
 
 MODEL_PATH = "./src/models/"
 MODEL_FILE_PATH = "./src/models/models.json"
+
+SEMANTIC_ENTROPY_THRESHOLD = 1.0  # high value -> uncertain, will need to tune this!!
+SEMANTIC_DENSITY_THRESHOLD = 0.3  # low value -> low confidence, will need to tune this!!
 
 
 class Agent(ABC):
@@ -66,6 +76,76 @@ class Agent(ABC):
             "invoke_expense_cost": self.invoke_expense_cost,
             "output_expense_cost": self.output_expense_cost,
         }
+
+
+    # @@ NEW ADDITIONS, keep an eye out on these next few functions in case they break things
+    def append_to_history(self, entry: dict):
+        """
+        Append a single history entry (expected form used earlier in integration):
+        {
+            "role": "agent" or "user",
+            "text": "...",
+            "semantic_entropy": float or None,
+            "semantic_density": float or None,
+            "timestamp": float
+        }
+        This method is intentionally tolerant (does minimal validation).
+        """
+        try:
+            if not isinstance(entry, dict):
+                # try to coerce simple strings into a text entry
+                entry = {"role": "agent", "text": str(entry), "timestamp": time.time()}
+            # Ensure there is a timestamp
+            if "timestamp" not in entry:
+                entry["timestamp"] = time.time()
+
+            # Append to in-memory history
+            self.history.append(entry)
+
+            # Optionally: persist to global MemoryManager if available
+            try:
+                # avoid import cycles; import lazily
+                from src.manager.memory_manager import MemoryManager
+                mm = MemoryManager.get_instance()
+                # store only high-level entries to memory (you can tune keys)
+                # Example criteria: store only agent outputs with semantic metrics or user preference entries
+                if entry.get("role") == "agent":
+                    # store compact memory record to avoid large memory bloat
+                    mem = {
+                        "type": "agent_output",
+                        "agent": getattr(self, "name", self.__class__.__name__),
+                        "text": entry.get("text"),
+                        "semantic_entropy": entry.get("semantic_entropy"),
+                        "semantic_density": entry.get("semantic_density"),
+                        "timestamp": entry.get("timestamp")
+                    }
+                    # MemoryManager may implement add_memory(action/add_memory) interface — be defensive
+                    try:
+                        mm.add_memory(mem)
+                    except Exception:
+                        # if memory manager API differs, ignore failure
+                        pass
+            except Exception:
+                # If MemoryManager not available (or import cycle), ignore gracefully
+                pass
+
+        except Exception as e:
+            # append_to_history should never raise; just log
+            try:
+                self.logger.exception("append_to_history failed: %s", e)
+            except Exception:
+                # worst case: fallback to module logger
+                _logger.exception("append_to_history failed: %s", e)
+
+    def get_history(self, n: int | None = None):
+        if n is None:
+            return list(self.history)
+        if n <= 0:
+            return []
+        return self.history[-n:]
+
+    def clear_history(self):
+        self.history = []
 
 
 class OllamaAgent(Agent):
@@ -289,9 +369,11 @@ class AgentManager():
 
     def __init__(self):
         self._agents: Dict[str, Agent] = {}
+        self.logger = logging.getLogger("AgentManager")
         self._agent_types = {
             "ollama": OllamaAgent,
-            "gemini": GeminiAgent,
+            # @@ something weird is going on with the google api key, disable gemini agents for now
+            # "gemini": GeminiAgent,
             "groq": GroqAgent,
             "lambda": LambdaAgent,
         }
@@ -332,6 +414,14 @@ class AgentManager():
 
         if agent_name in self._agents:
             raise ValueError(f"Agent {agent_name} already exists")
+
+        # @@ NEW ADDITION, should throw an error if something is wrong
+        if "gemini" in base_model and not os.environ.get("GOOGLE_API_KEY"):
+            return {
+                "status": "error",
+                "message": "Gemini models disabled (GOOGLE_API_KEY not set).",
+                "output": None
+            }
 
         self._agents[agent_name] = self.create_agent_class(
             agent_name,
@@ -480,13 +570,118 @@ class AgentManager():
         self.budget_manager.add_to_expense_budget(
             agent.invoke_expense_cost*n_tokens)
 
-        response = agent.ask_agent(prompt)
-        n_tokens = len(response.split())/1000000
+        result = agent.ask_agent(prompt)
+        n_tokens = len(result.split())/1000000
         self.budget_manager.add_to_expense_budget(
             agent.output_expense_cost*n_tokens)
-        return (response,
+
+        # @@ NEW STUFF HERE
+        text = result.get("text") if isinstance(result, dict) else result
+
+        # --- Compute semantic metrics (synchronous) ---
+        # Prefer calling ToolManager.runTool so we keep the tool semantics (or call direct wrappers).
+        try:
+            # Option A: call the tool pipeline (preferred if you want CEO to also see a tool call trace)
+            # tool_resp = ToolManager.get_instance().runTool("compute_semantic_metrics",
+            #                                                {"prompt": prompt, "response": text, "mode":"fast"})
+            # entropy = float(tool_resp["entropy"]); density = float(tool_resp["density"])
+
+            # Option B: call directly (faster, bypasses tool code)
+            entropy_info = compute_semantic_entropy(prompt=prompt, response=text)
+            density_info = compute_semantic_density(prompt=prompt, response=text)
+            entropy = entropy_info["entropy"]
+            density = density_info["density"]
+        except Exception as e:
+            # fallback: log and continue without metrics
+            self.logger.warning("Semantic metric compute failed for agent %s: %s", agent_name, e)
+            entropy = None
+            density = None
+
+        # store metrics in agent history for later aggregate scoring
+        # @@ source of error, function does not exist for all type of agents, FIX THAT
+        # agent.append_to_history({
+        #     "role": "agent",
+        #     "text": text,
+        #     "semantic_entropy": entropy,
+        #     "semantic_density": density,
+        #     "timestamp": time.time()
+        # })
+
+        # @@ NEW ATTEMPT, should log issues instead of crash if the history function does not work
+        # After receiving text from agent
+        entry = {
+            "role": "agent",
+            "text": text,
+            "semantic_entropy": entropy,
+            "semantic_density": density,
+            "timestamp": time.time()
+        }
+        # Defensive call; prefer agent.append_to_history if available
+        try:
+            append_fn = getattr(agent, "append_to_history", None)
+            if callable(append_fn):
+                append_fn(entry)
+            else:
+                # fallback: record in AgentManager-level history map if needed
+                try:
+                    self._agent_histories.setdefault(agent_id, []).append(entry)
+                except Exception:
+                    # As last resort, log and continue
+                    self.logger.warning("Could not append agent history for %s", getattr(agent, "name", agent_id))
+        except Exception as e:
+            self.logger.exception("append_to_history invocation failed: %s", e)
+
+        # --- Decision rules: reprompt / escalate ---
+        # Example rule: if entropy is high OR density is low, attempt a reprompt
+        reprompted = False
+        if entropy is not None and density is not None:
+            if (entropy > SEMANTIC_ENTROPY_THRESHOLD) or (density < SEMANTIC_DENSITY_THRESHOLD):
+                # Prepare a reprompt template. You can make this more sophisticated.
+                reprompt_msg = ("Your previous response seems uncertain/conflicting (semantic_entropy={:.3f}, semantic_density={:.3f}). "
+                                "Please try again, prioritize factual grounding and be explicit about uncertainty. "
+                                "If you can't be confident, say 'I don't know'.\n\nOriginal task: {}\n").format(entropy, density, prompt)
+                # Try one reprompt (avoid infinite loop): may pass `reprompt_count` in kwargs to limit
+                reprompt_count = kwargs.get("reprompt_count", 0)
+                if reprompt_count < 1:
+                    reprompted = True
+                    new_result = agent.ask_agent(prompt + "\n\n" + reprompt_msg, reprompt_count=reprompt_count+1)
+                    # re-evaluate metrics for the new result (optionally)
+                    # ... compute metrics again and store
+                    result = new_result
+
+        return (result,
                 self.budget_manager.get_current_remaining_resource_budget(),
                 self.budget_manager.get_current_remaining_expense_budget())
+
+    # @@ NEW FUNCTION
+    def evaluate_agent_score(self, agent_name, recent_n=10):
+        """
+        Existing evaluation already considers cost, performance, and resource usage.
+        Add semantic-confidence score into final weighted score.
+        """
+        base_score = self.compute_base_score(agent_name)
+        # compute average density / entropy over recent outputs
+        hist = self.get_agent_history(agent_name)[-recent_n:]
+        densities = [h.get("semantic_density") for h in hist if h.get("semantic_density") is not None]
+        entropies = [h.get("semantic_entropy") for h in hist if h.get("semantic_entropy") is not None]
+        if densities:
+            avg_density = sum(densities)/len(densities)
+        else:
+            avg_density = None
+        if entropies:
+            avg_entropy = sum(entropies)/len(entropies)
+        else:
+            avg_entropy = None
+
+        # Example weighting: increase score if high density, decrease if high entropy
+        score = base_score
+        if avg_density is not None:
+            score += (avg_density - 0.5) * 2.0   # @@ adjust weight as needed, will need to finetune!!
+        if avg_entropy is not None:
+            score -= (avg_entropy - 0.5) * 1.5  # @@ penalize high entropy, will need to finetune!!
+
+        # Combine with cost penalties (already in base_score)
+        return score
 
     def _save_agent(self,
                     agent_name: str,

@@ -1,1 +1,192 @@
-{}
+{
+    "SuperheroAnalyzer": {
+        "base_model": "gemini-2.5-flash-preview-05-20",
+        "description": "Analyzes and compares superheroes.",
+        "system_prompt": "You are an expert in analyzing superheroes from comic books, movies, and television. Your task is to compare and contrast different superheroes based on their powers, weaknesses, origins, and impact. Provide detailed and unbiased analysis.",
+        "create_resource_cost": 0,
+        "invoke_resource_cost": 0,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0.15,
+        "output_expense_cost": 0.6
+    },
+    "HamburgerExpert": {
+        "base_model": "llama3.2",
+        "description": "Expert on hamburgers",
+        "system_prompt": "You are an expert on hamburgers. You know everything about what makes a hamburger the 'best' including ingredients, cooking methods, and toppings. You can synthesize information from different sources to provide a comprehensive answer.",
+        "create_resource_cost": 10,
+        "invoke_resource_cost": 40,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "BirthdayAnalyst": {
+        "base_model": "llama3.2",
+        "description": "Determines the day of the year with the most births.",
+        "system_prompt": "You are an expert data analyst specializing in birth date statistics. You are able to synthesize information from multiple search results to determine the day of the year with the most births. Provide the answer in the format Month Day.",
+        "create_resource_cost": 10,
+        "invoke_resource_cost": 40,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "MovieReviewAnalyst": {
+        "base_model": "llama3.2",
+        "description": "Analyzes movie reviews and ratings to determine the best Superman movie.",
+        "system_prompt": "You are a movie critic and data analyst. You will analyze critic reviews and audience ratings from Rotten Tomatoes, Metacritic, and IMDb to determine the best Superman movie. Provide a detailed explanation of your methodology and findings.",
+        "create_resource_cost": 10,
+        "invoke_resource_cost": 40,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "MovieReviewAgent": {
+        "base_model": "deepseek-r1",
+        "description": "Analyzes movie reviews and ratings to determine the best movie in a given category.",
+        "system_prompt": "You are a movie critic that analyzes reviews and ratings from various sources to determine the best movie in a given category. Provide a detailed explanation of why a particular movie is considered the best, referencing specific reviews and ratings.",
+        "create_resource_cost": 20,
+        "invoke_resource_cost": 150,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "MovieReviewAgent2": {
+        "base_model": "llama3.2",
+        "description": "Analyzes movie reviews and ratings to determine the best movie in a given category.",
+        "system_prompt": "You are a movie critic that analyzes reviews and ratings from various sources to determine the best movie in a given category. Provide a detailed explanation of why a particular movie is considered the best, referencing specific reviews and ratings.",
+        "create_resource_cost": 10,
+        "invoke_resource_cost": 40,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "BatmanReviewer": {
+        "base_model": "deepseek-r1",
+        "description": "Analyzes search results to determine the best Batman movie.",
+        "system_prompt": "You are an expert movie critic specializing in Batman movies. You will analyze search results to determine the best Batman movie according to critics and fans. Provide a detailed explanation of your reasoning.",
+        "create_resource_cost": 20,
+        "invoke_resource_cost": 150,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "BatmanMovieCritic2": {
+        "base_model": "llama3.2",
+        "description": "A movie critic specializing in Batman movies.",
+        "system_prompt": "You are a movie critic specializing in Batman movies. Your task is to analyze online reviews, critic scores, and box office success to determine the best Batman movie. Provide a detailed explanation of your reasoning.",
+        "create_resource_cost": 10,
+        "invoke_resource_cost": 40,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "BatmanMovieCritic": {
+        "base_model": "deepseek-r1",
+        "description": "Determines the best Batman movie based on reviews, fan opinions, and box office success.",
+        "system_prompt": "You are a movie critic specializing in Batman films. Analyze critic reviews, fan opinions, and box office success to determine the 'best' Batman movie. Consider factors like acting, plot, direction, and cultural impact. Provide a detailed explanation of your reasoning.",
+        "create_resource_cost": 20,
+        "invoke_resource_cost": 150,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "BatmanMovieCriticLite": {
+        "base_model": "llama3.2",
+        "description": "Determines the best Batman movie based on reviews, fan opinions, and box office success.",
+        "system_prompt": "You are a movie critic specializing in Batman films. Analyze critic reviews, fan opinions, and box office success to determine the 'best' Batman movie. Consider factors like acting, plot, direction, and cultural impact. Provide a concise explanation of your reasoning.",
+        "create_resource_cost": 10,
+        "invoke_resource_cost": 40,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "StarWarsStrengthAnalyzer": {
+        "base_model": "deepseek-r1",
+        "description": "Analyzes and compares the strengths of Star Wars characters.",
+        "system_prompt": "You are an expert in Star Wars lore, specializing in analyzing the strengths and weaknesses of different characters. Provide detailed comparisons based on their abilities with the Force, combat skills, strategic thinking, and overall impact on the Star Wars universe.",
+        "create_resource_cost": 20,
+        "invoke_resource_cost": 150,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "StateComparerLite": {
+        "base_model": "llama3.2",
+        "description": "Compares two US states based on various factors.",
+        "system_prompt": "You are an expert at comparing US states. You are given a request to compare two states and you must provide a detailed comparison of the pros and cons of each state, taking into account factors such as cost of living, job market, climate, education, and culture.",
+        "create_resource_cost": 1,
+        "invoke_resource_cost": 2,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "FruitAnalyzer2": {
+        "base_model": "llama3.2",
+        "description": "Analyzes and compares fruits.",
+        "system_prompt": "You are a fruit expert. You analyze the nutritional benefits, flavor profiles, and culinary uses of different fruits. Provide a detailed comparison of apples and oranges, highlighting their strengths and weaknesses. Conclude by stating that the 'better' fruit depends on individual preferences and needs.",
+        "create_resource_cost": 1,
+        "invoke_resource_cost": 2,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "FoodAnalyzer": {
+        "base_model": "llama3.2",
+        "description": "Analyzes and compares different types of food.",
+        "system_prompt": "You are a food expert. You analyze different types of food and provide a comparison based on taste, texture, nutritional value, and cultural significance.",
+        "create_resource_cost": 1,
+        "invoke_resource_cost": 2,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "PoolBeachComparer": {
+        "base_model": "deepseek-r1",
+        "description": "Compares the pros and cons of pools and beaches.",
+        "system_prompt": "You are an expert at comparing the pros and cons of swimming pools and beaches. You should consider factors like cost, convenience, safety, cleanliness, and enjoyment.",
+        "create_resource_cost": 2,
+        "invoke_resource_cost": 4,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "FranchiseComparer": {
+        "base_model": "deepseek-r1",
+        "description": "Compares two franchises based on gameplay, story, characters, and overall popularity.",
+        "system_prompt": "You are an expert at comparing different franchises. You will be given information about two franchises and will analyze them based on gameplay, story, characters, and overall popularity. You will provide a detailed comparison of the two franchises, highlighting their strengths and weaknesses.",
+        "create_resource_cost": 2,
+        "invoke_resource_cost": 4,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "CookieComparer": {
+        "base_model": "llama3.2",
+        "description": "Agent for comparing chocolate chip and sugar cookies.",
+        "system_prompt": "You are an expert in analyzing and comparing different types of cookies. Provide a balanced comparison of chocolate chip cookies and sugar cookies, considering factors like taste, texture, ingredients, and versatility.",
+        "create_resource_cost": 1,
+        "invoke_resource_cost": 2,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "DolphinOrcaComparer": {
+        "base_model": "llama3.2",
+        "description": "Compares dolphins and orcas based on various factors.",
+        "system_prompt": "You are an expert in marine biology, tasked with comparing dolphins and orcas based on various factors such as intelligence, social behavior, physical characteristics, and ecological role. Provide a balanced and objective comparison.",
+        "create_resource_cost": 1,
+        "invoke_resource_cost": 2,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "SportsAnalyzer": {
+        "base_model": "llama3.2",
+        "description": "Analyzes sports and provides recommendations.",
+        "system_prompt": "You are an expert sports analyst. You can analyze the pros and cons of different sports and provide a recommendation based on the user's preferences.",
+        "create_resource_cost": 1,
+        "invoke_resource_cost": 2,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    }
+}
