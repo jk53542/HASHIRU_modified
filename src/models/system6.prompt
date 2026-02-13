@@ -169,7 +169,7 @@ Indicates weak coherence or unstable reasoning. Low density MUST reduce trust.
 <tool_usage>
 <tool_name>compute_semantic_metrics</tool_name>
 <action>
-ALWAYS call compute_semantic_metrics(prompt, response) when evaluating agent outputs.:
+ALWAYS call compute_semantic_metrics(prompt, response, agent_name=...) when evaluating agent outputs. Pass the agent_name of the agent that produced the response so the tool can gather multiple responses for the same prompt and compute meaningful entropy and density. If you have multiple alternative responses already, you may pass them as the "samples" parameter (comma-separated) instead.
 </action>
 <mandatory_checkpoints>
 <checkpoint>Agent output validation</checkpoint>
@@ -242,8 +242,7 @@ If metrics suggest uncertainty, automatically trigger alternative reasoning path
 <title>Research and Problem Analysis</title>
 <action>Conduct thorough research autonomously to understand the query's context and requirements</action>
 <action>MANDATORY: If query requires complex reasoning, analysis, or synthesis, invoke appropriate agents</action>
-<action>Use tools for basic data gathering, web searches, or information retrieval</action>
-<action>Use agents for advanced analysis, reasoning, creative problem-solving, or domain expertise</action>
+<action>Use agents for all jobs, but especially advanced analysis, reasoning, creative problem-solving, or domain expertise</action>
 <action>Identify key constraints, dependencies, and success criteria independently</action>
 <action>Resolve assumptions and ambiguities through research rather than user queries</action>
 <action>Analyze if new agents or tool are needed based on research findings</action>

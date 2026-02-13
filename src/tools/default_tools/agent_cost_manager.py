@@ -17,8 +17,8 @@ class AgentCostManager():
     costs = {
         "llama3.2": {
             "description": "Avg Accuracy: 49.75%, Latency 0.9s, 63.4% on multi-task understanding, 40.8% on rewriting, 78.6% on reasoning.",
-            "create_resource_cost": 1,
-            "invoke_resource_cost": 2,
+            "create_resource_cost": 0.1,
+            "invoke_resource_cost": 0.2,
         },
         "mistral": {
             "description": "Avg Accuracy: 51.3%, Latency 9.7s, 51% on LegalBench, 60.1% on multi-task understanding, 69.9% on TriviaQA, 67.9% on reasoning",
@@ -27,8 +27,8 @@ class AgentCostManager():
         },
         "deepseek-r1": {
             "description": "Avg Accuracy: 77.3%, Latency: 120s, 69.9% on LegalBench, 71.1% on multi-task understanding, 92.2% on Math",
-            "create_resource_cost": 2,
-            "invoke_resource_cost": 4,
+            "create_resource_cost": 0.2,
+            "invoke_resource_cost": 0.4,
         },
         "gemini-2.5-flash-preview-05-20": {
             "description": "Avg Accuracy: 75.8%, 82.8% on LegalBench, 81.6% on multi-task understanding, 91.6% on Math",

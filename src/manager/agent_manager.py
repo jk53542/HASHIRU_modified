@@ -19,13 +19,17 @@ import time
 # @@ inside src/manager/agent_manager.py
 from src.manager.tool_manager import ToolManager  # if ToolManager is importable here
 # OR direct import of metrics wrapper:
-# from src.metrics.semantic_metrics import compute_semantic_entropy, compute_semantic_density
+from src.metrics.semantic_metrics import compute_semantic_entropy, compute_semantic_density
 
 MODEL_PATH = "./src/models/"
 MODEL_FILE_PATH = "./src/models/models.json"
 
 SEMANTIC_ENTROPY_THRESHOLD = 1.0  # high value -> uncertain, will need to tune this!!
 SEMANTIC_DENSITY_THRESHOLD = 0.3  # low value -> low confidence, will need to tune this!!
+
+# Number of extra agent responses to gather for the same prompt so semantic entropy/density get multiple samples.
+# Extra responses for semantic metrics: 0 = only gather when compute_semantic_metrics tool is used (saves budget)
+NUM_EXTRA_RESPONSES_FOR_SEMANTIC = 0
 
 
 class Agent(ABC):
@@ -504,6 +508,34 @@ class AgentManager():
             raise ValueError(f"Agent {agent_name} does not exists")
         return self._agents[agent_name]
 
+    def get_agent_responses(self, agent_name: str, prompt: str, num_responses: int) -> list:
+        """
+        Get num_responses from the agent for the same prompt (for semantic metrics).
+        Returns a list of response strings. Does not compute metrics or append to history.
+        """
+        agent = self.get_agent(agent_name)
+        if not self.is_local_invocation_enabled and agent.get_type() == "local":
+            raise ValueError("Local invocation mode is disabled.")
+        if not self.is_cloud_invocation_enabled and agent.get_type() == "cloud":
+            raise ValueError("Cloud invocation mode is disabled.")
+        texts = []
+        n_tokens_prompt = len(prompt.split()) / 1000000
+        for _ in range(num_responses):
+            try:
+                self.validate_budget(agent.invoke_resource_cost,
+                                     agent.invoke_expense_cost * n_tokens_prompt)
+                self.budget_manager.add_to_expense_budget(agent.invoke_expense_cost * n_tokens_prompt)
+                result = agent.ask_agent(prompt)
+                t = result.get("text") if isinstance(result, dict) else result
+                if t and str(t).strip():
+                    texts.append(str(t).strip())
+                n_out = len((t or "").split()) / 1000000
+                self.budget_manager.add_to_expense_budget(agent.output_expense_cost * n_out)
+            except Exception as e:
+                self.logger.debug("get_agent_responses: one call failed: %s", e)
+                break
+        return texts
+
     def list_agents(self) -> dict:
         """Return agent information (name, description, costs)"""
         try:
@@ -550,7 +582,7 @@ class AgentManager():
         return (self.budget_manager.get_current_remaining_resource_budget(),
                 self.budget_manager.get_current_remaining_expense_budget())
 
-    def ask_agent(self, agent_name: str, prompt: str) -> Tuple[str, int]:
+    def ask_agent(self, agent_name: str, prompt: str, **kwargs) -> Tuple[str, int]:
         agent: Agent = self.get_agent(agent_name)
         print(agent.get_type())
         print(agent_name)
@@ -571,31 +603,44 @@ class AgentManager():
             agent.invoke_expense_cost*n_tokens)
 
         result = agent.ask_agent(prompt)
-        n_tokens = len(result.split())/1000000
-        self.budget_manager.add_to_expense_budget(
-            agent.output_expense_cost*n_tokens)
-
-        # @@ NEW STUFF HERE
         text = result.get("text") if isinstance(result, dict) else result
+        n_tokens = len((text or "").split()) / 1000000
+        self.budget_manager.add_to_expense_budget(
+            agent.output_expense_cost * n_tokens)
 
-        # --- Compute semantic metrics (synchronous) ---
-        # Prefer calling ToolManager.runTool so we keep the tool semantics (or call direct wrappers).
-        try:
-            # Option A: call the tool pipeline (preferred if you want CEO to also see a tool call trace)
-            # tool_resp = ToolManager.get_instance().runTool("compute_semantic_metrics",
-            #                                                {"prompt": prompt, "response": text, "mode":"fast"})
-            # entropy = float(tool_resp["entropy"]); density = float(tool_resp["density"])
+        # --- Gather extra responses for semantic metrics (same prompt, multiple samples) ---
+        samples_for_metrics = []
+        for _ in range(NUM_EXTRA_RESPONSES_FOR_SEMANTIC):
+            try:
+                self.validate_budget(agent.invoke_resource_cost,
+                                     agent.invoke_expense_cost * n_tokens)
+                self.budget_manager.add_to_expense_budget(
+                    agent.invoke_expense_cost * n_tokens)
+                extra_result = agent.ask_agent(prompt)
+                extra_text = extra_result.get("text") if isinstance(extra_result, dict) else extra_result
+                if extra_text and extra_text.strip():
+                    samples_for_metrics.append(extra_text.strip())
+                n_tokens_out = len((extra_text or "").split()) / 1000000
+                self.budget_manager.add_to_expense_budget(
+                    agent.output_expense_cost * n_tokens_out)
+            except Exception as e:
+                self.logger.debug("Extra response for semantic metrics failed (continuing with what we have): %s", e)
+                break
 
-            # Option B: call directly (faster, bypasses tool code)
-            entropy_info = compute_semantic_entropy(prompt=prompt, response=text)
-            density_info = compute_semantic_density(prompt=prompt, response=text)
-            entropy = entropy_info["entropy"]
-            density = density_info["density"]
-        except Exception as e:
-            # fallback: log and continue without metrics
-            self.logger.warning("Semantic metric compute failed for agent %s: %s", agent_name, e)
-            entropy = None
-            density = None
+        # --- Compute semantic metrics only when we have multiple responses (samples) ---
+        entropy, density = None, None
+        if samples_for_metrics:
+            try:
+                entropy_info = compute_semantic_entropy(
+                    prompt=prompt, response=text, samples=samples_for_metrics
+                )
+                density_info = compute_semantic_density(
+                    prompt=prompt, response=text, samples=samples_for_metrics
+                )
+                entropy = entropy_info["entropy"]
+                density = density_info["density"]
+            except Exception as e:
+                self.logger.warning("Semantic metric compute failed for agent %s: %s", agent_name, e)
 
         # store metrics in agent history for later aggregate scoring
         # @@ source of error, function does not exist for all type of agents, FIX THAT
@@ -624,10 +669,10 @@ class AgentManager():
             else:
                 # fallback: record in AgentManager-level history map if needed
                 try:
-                    self._agent_histories.setdefault(agent_id, []).append(entry)
+                    self._agent_histories.setdefault(agent_name, []).append(entry)
                 except Exception:
                     # As last resort, log and continue
-                    self.logger.warning("Could not append agent history for %s", getattr(agent, "name", agent_id))
+                    self.logger.warning("Could not append agent history for %s", getattr(agent, "name", agent_name))
         except Exception as e:
             self.logger.exception("append_to_history invocation failed: %s", e)
 
@@ -644,7 +689,7 @@ class AgentManager():
                 reprompt_count = kwargs.get("reprompt_count", 0)
                 if reprompt_count < 1:
                     reprompted = True
-                    new_result = agent.ask_agent(prompt + "\n\n" + reprompt_msg, reprompt_count=reprompt_count+1)
+                    new_result = agent.ask_agent(prompt + "\n\n" + reprompt_msg)
                     # re-evaluate metrics for the new result (optionally)
                     # ... compute metrics again and store
                     result = new_result

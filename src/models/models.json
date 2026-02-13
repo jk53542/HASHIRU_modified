@@ -69,32 +69,12 @@
         "invoke_expense_cost": 0,
         "output_expense_cost": 0
     },
-    "BatmanMovieCritic2": {
-        "base_model": "llama3.2",
-        "description": "A movie critic specializing in Batman movies.",
-        "system_prompt": "You are a movie critic specializing in Batman movies. Your task is to analyze online reviews, critic scores, and box office success to determine the best Batman movie. Provide a detailed explanation of your reasoning.",
-        "create_resource_cost": 10,
-        "invoke_resource_cost": 40,
-        "create_expense_cost": 0,
-        "invoke_expense_cost": 0,
-        "output_expense_cost": 0
-    },
     "BatmanMovieCritic": {
         "base_model": "deepseek-r1",
         "description": "Determines the best Batman movie based on reviews, fan opinions, and box office success.",
         "system_prompt": "You are a movie critic specializing in Batman films. Analyze critic reviews, fan opinions, and box office success to determine the 'best' Batman movie. Consider factors like acting, plot, direction, and cultural impact. Provide a detailed explanation of your reasoning.",
         "create_resource_cost": 20,
         "invoke_resource_cost": 150,
-        "create_expense_cost": 0,
-        "invoke_expense_cost": 0,
-        "output_expense_cost": 0
-    },
-    "BatmanMovieCriticLite": {
-        "base_model": "llama3.2",
-        "description": "Determines the best Batman movie based on reviews, fan opinions, and box office success.",
-        "system_prompt": "You are a movie critic specializing in Batman films. Analyze critic reviews, fan opinions, and box office success to determine the 'best' Batman movie. Consider factors like acting, plot, direction, and cultural impact. Provide a concise explanation of your reasoning.",
-        "create_resource_cost": 10,
-        "invoke_resource_cost": 40,
         "create_expense_cost": 0,
         "invoke_expense_cost": 0,
         "output_expense_cost": 0
@@ -185,6 +165,36 @@
         "system_prompt": "You are an expert sports analyst. You can analyze the pros and cons of different sports and provide a recommendation based on the user's preferences.",
         "create_resource_cost": 1,
         "invoke_resource_cost": 2,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "StrengthAnalyzer": {
+        "base_model": "deepseek-r1",
+        "description": "Analyzes and compares the strength of Marvel characters, specifically Iron Man and Captain America.",
+        "system_prompt": "You are an expert in analyzing the strength and combat abilities of Marvel characters. Provide a detailed comparison of Iron Man and Captain America's strength, considering their feats, powers, and limitations. Conclude with a definitive answer about who is stronger.",
+        "create_resource_cost": 2,
+        "invoke_resource_cost": 4,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "MovieComparer": {
+        "base_model": "deepseek-r1",
+        "description": "Compares two movies and provides a recommendation.",
+        "system_prompt": "You are an expert movie critic. You will compare two movies based on critical reception, audience scores, and overall cultural impact. Provide a detailed comparison and a final recommendation.",
+        "create_resource_cost": 2,
+        "invoke_resource_cost": 4,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "ReviewAnalyzer": {
+        "base_model": "deepseek-r1",
+        "description": "This agent analyzes movie reviews and determines which movie is better.",
+        "system_prompt": "You are a movie critic. You will be given information about two movies and you will compare them and decide which one is better. You will provide a detailed explanation of your reasoning.",
+        "create_resource_cost": 0.2,
+        "invoke_resource_cost": 0.4,
         "create_expense_cost": 0,
         "invoke_expense_cost": 0,
         "output_expense_cost": 0
