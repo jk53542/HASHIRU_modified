@@ -79,7 +79,7 @@ class SemanticMetricsTool:
             if (not samples_list or len(samples_list) == 0) and agent_name:
                 try:
                     from src.manager.agent_manager import AgentManager
-                    _num_extra = 3  # number of extra responses for meaningful entropy/density
+                    _num_extra = 4  # paper recommends 4+ samples for meaningful entropy/density
                     extra = AgentManager().get_agent_responses(agent_name, prompt, _num_extra)
                     if extra:
                         samples_list = extra

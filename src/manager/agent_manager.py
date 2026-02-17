@@ -19,7 +19,7 @@ import time
 # @@ inside src/manager/agent_manager.py
 from src.manager.tool_manager import ToolManager  # if ToolManager is importable here
 # OR direct import of metrics wrapper:
-from src.metrics.semantic_metrics import compute_semantic_entropy, compute_semantic_density
+from src.metrics.semantic_metrics import compute_semantic_metrics_both
 
 MODEL_PATH = "./src/models/"
 MODEL_FILE_PATH = "./src/models/models.json"
@@ -29,7 +29,7 @@ SEMANTIC_DENSITY_THRESHOLD = 0.3  # low value -> low confidence, will need to tu
 
 # Number of extra agent responses to gather for the same prompt so semantic entropy/density get multiple samples.
 # Extra responses for semantic metrics: 0 = only gather when compute_semantic_metrics tool is used (saves budget)
-NUM_EXTRA_RESPONSES_FOR_SEMANTIC = 0
+NUM_EXTRA_RESPONSES_FOR_SEMANTIC = 4  # paper recommends multiple samples (e.g. 4) for entropy/density
 
 
 class Agent(ABC):
@@ -627,18 +627,19 @@ class AgentManager():
                 self.logger.debug("Extra response for semantic metrics failed (continuing with what we have): %s", e)
                 break
 
-        # --- Compute semantic metrics only when we have multiple responses (samples) ---
+        # --- Compute semantic metrics only when we have multiple responses (samples); single gateway call for both ---
         entropy, density = None, None
         if samples_for_metrics:
             try:
-                entropy_info = compute_semantic_entropy(
+                both = compute_semantic_metrics_both(
                     prompt=prompt, response=text, samples=samples_for_metrics
                 )
-                density_info = compute_semantic_density(
-                    prompt=prompt, response=text, samples=samples_for_metrics
-                )
-                entropy = entropy_info["entropy"]
-                density = density_info["density"]
+                entropy = both.get("entropy")
+                density = both.get("density")
+                if not both.get("diagnostics", {}).get("entropy_ok"):
+                    self.logger.debug("Entropy backend reported error: %s", both.get("diagnostics", {}).get("entropy_error"))
+                if not both.get("diagnostics", {}).get("density_ok"):
+                    self.logger.debug("Density backend reported error: %s", both.get("diagnostics", {}).get("density_error"))
             except Exception as e:
                 self.logger.warning("Semantic metric compute failed for agent %s: %s", agent_name, e)
 

@@ -62,6 +62,29 @@ To use the project with additional tools and agents, you need to:
 
 Please note that by default, we do provide a lot of pre-defined tools and agents, so you may not need to create your own tools unless you have specific requirements.
 
+## GPU support
+
+HASHIRU uses PyTorch (and SentenceTransformer) for memory and semantic features. To use your **NVIDIA GPU** (e.g. RTX 3060) instead of CPU:
+
+1. **Fix the message:** The budget manager no longer prints "No GPU detected. Using CPU." when a GPU is present; that line was a bug (it used to always print). After the fix, you should see only "GPU detected: …" and "Total VRAM: …" when the GPU is available.
+
+2. **If you still see "No GPU detected. Using CPU."**, your venv likely has **CPU-only PyTorch**. Reinstall PyTorch with CUDA support (use the same Python/venv):
+
+   - **Check your CUDA version** (on the host or WSL): `nvidia-smi` (e.g. CUDA 12.x or 11.8).
+   - **Install PyTorch with CUDA** from [pytorch.org](https://pytorch.org/get-started/locally/) (choose CUDA 11.8 or 12.1 as appropriate). Example for **CUDA 12.1** (Linux/WSL):
+     ```bash
+     pip uninstall torch -y
+     pip install torch --index-url https://download.pytorch.org/whl/cu121
+     ```
+     For **CUDA 11.8**:
+     ```bash
+     pip uninstall torch -y
+     pip install torch --index-url https://download.pytorch.org/whl/cu118
+     ```
+   - **Confirm GPU is seen:** `python -c "import torch; print('CUDA:', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"`
+
+   On **WSL2**, ensure NVIDIA drivers are installed on Windows and that WSL can use the GPU; `nvidia-smi` should work from the WSL terminal.
+
 ## Model Support
 The project supports the following language model integrations:
 - **Ollama**: Local model management and invocation.

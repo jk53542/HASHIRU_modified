@@ -230,6 +230,8 @@ If `environment_llama3.yml` fails (e.g. different Linux or prefix), create a min
 | Entropy backend service    | See “Start entropy service” below (requires PYTHONPATH). |
 | Density backend service   | `conda activate semantic_density` → `cd .../experiment_code` → `uvicorn density_service:app --host 127.0.0.1 --port 8125` |
 
+**Ports matter:** the gateway calls **entropy** at 8124 and **density** at 8125. If you start entropy on 8125 and density on 8124, the gateway will still use the returned values (it detects responses by key), but for clarity run entropy on **8124** and density on **8125**.
+
 ### Start entropy service (port 8124)
 
 The entropy app imports `from uncertainty.xxx`, so Python must see the directory that **contains** the `uncertainty` package (the **inner** `semantic_uncertainty` folder). In a new terminal, run:
@@ -383,6 +385,20 @@ conda activate semantic_density
 ```
 
 Then verify from `experiment_code` (see Part 2). The minimal env has everything needed for `semantic_metrics` and the DeBERTa-based density scripts; it does not install `auto-gptq` or `peft`. If you later need the full paper pipeline with those, create a separate env and relax the safetensors pin in the yaml to `safetensors>=0.4.1` (and consider dropping or loosening auto-gptq/peft if conflicts persist).
+
+---
+
+### HuggingFace requests and "loading weights"
+
+When the entropy or density service starts, you will see many HTTP requests to `huggingface.co`. This is normal: the libraries are downloading the **NLI/embedding models** (DeBERTa, all-MiniLM-L6-v2). Some 404s (e.g. `adapter_config.json`) are optional; the services set `httpx` and `huggingface_hub` to WARNING to reduce noise. **"Loading weights"** = the NLI/embedding model, not your agent LLM. Set `HF_TOKEN` for faster downloads.
+
+### Semantic entropy always 0.0
+
+If **entropy = 0.0** always, the NLI model is putting all responses in one semantic cluster. You can try:
+
+1. **`STRICT_ENTAILMENT=false`** – looser clustering (fewer pairs count as equivalent).
+2. **`ENTAILMENT_THRESHOLD=0.9`** (or `0.95`) – use probability-based equivalence: two responses are in the same cluster only if both directions have P(entailment) ≥ this value. Higher values give more clusters. Set in the env where you start the entropy service, e.g. `export ENTAILMENT_THRESHOLD=0.95`.
+3. **`ENTROPY_LAST_N_WORDS=200`** – use the last 200 words of each response instead of 100 so more variation is included (default 100). Use **4+ samples** per prompt (HASHIRU uses 4 by default).
 
 ---
 

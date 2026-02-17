@@ -39,12 +39,13 @@ class BudgetManager():
             gpu_index = torch.cuda.current_device()
             gpu_name = torch.cuda.get_device_name(gpu_index)
             total_vram = torch.cuda.get_device_properties(gpu_index).total_memory
-            gpu_mem = total_vram /1024 ** 3
+            gpu_mem = total_vram / 1024 ** 3
             print(f"GPU detected: {gpu_name}")
             print(f"Total VRAM: {gpu_mem:.2f} GB")
+        else:
+            print("No GPU detected. Using CPU.")
         mem = psutil.virtual_memory()
-        ram_mem = mem.total/ 1024 ** 3
-        print("No GPU detected. Using CPU.")
+        ram_mem = mem.total / 1024 ** 3
         print(f"Total RAM: {ram_mem:.2f} GB")
         total_mem = gpu_mem + ram_mem
         return round((total_mem / 16) * 100)
