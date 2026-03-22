@@ -1,8 +1,7 @@
 import importlib
 import importlib.util
 import os
-import types
-from typing import List
+from typing import List, Type, Any
 import pip
 from google.genai import types
 
@@ -17,6 +16,45 @@ toolsImported = []
 TOOLS_DIRECTORIES = [os.path.abspath("./src/tools/default_tools"), os.path.abspath("./src/tools/user_tools")]
 
 installed_packages = set()
+
+
+def _resolve_tool_class_from_module(foo: Any, module_name: str) -> Type:
+    """
+    Resolve the Tool class for a module under default_tools/ or user_tools/.
+
+    Standard tools define __all__ = ['ClassName']. ToolCreator output often omits __all__;
+    then we pick a public class with inputSchema + run().
+    """
+    if hasattr(foo, "__all__") and getattr(foo, "__all__", None):
+        primary = foo.__all__[0]
+        if isinstance(primary, str) and hasattr(foo, primary):
+            cls = getattr(foo, primary)
+            if isinstance(cls, type):
+                return cls
+    candidates: list[tuple[str, type]] = []
+    for name in dir(foo):
+        if name.startswith("_"):
+            continue
+        obj = getattr(foo, name, None)
+        if not isinstance(obj, type):
+            continue
+        if getattr(obj, "inputSchema", None) is None:
+            continue
+        if not callable(getattr(obj, "run", None)):
+            continue
+        candidates.append((name, obj))
+    if not candidates:
+        raise AttributeError(
+            "no __all__ and no class with inputSchema + run() "
+            "(see src/tools/user_tools/WordCountExtractor.py)"
+        )
+    mn = module_name.lower().replace("_", "")
+    for name, obj in candidates:
+        n = name.lower().replace("_", "")
+        if n == mn or mn in n or n in mn:
+            return obj
+    return candidates[0][1]
+
 
 class Tool:
     def __init__(self, toolClass):
@@ -86,17 +124,23 @@ class ToolManager:
             for filename in os.listdir(directory):
                 if filename.endswith(".py") and filename != "__init__.py":
                     module_name = filename[:-3]
-                    spec = importlib.util.spec_from_file_location(module_name, f"{directory}/{filename}")
-                    foo = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(foo)
-                    class_name = foo.__all__[0]
-                    toolClass = getattr(foo, class_name)
-                    toolObj = Tool(toolClass)
-                    newToolsImported.append(toolObj)
-                    if toolObj.create_resource_cost is not None:
-                        self.budget_manager.add_to_resource_budget(toolObj.create_resource_cost)
-                    if toolObj.create_expense_cost is not None:
-                        self.budget_manager.add_to_resource_budget(toolObj.create_expense_cost)
+                    path = os.path.join(directory, filename)
+                    try:
+                        spec = importlib.util.spec_from_file_location(module_name, path)
+                        if spec is None or spec.loader is None:
+                            print(f"Skipping tool {module_name!r}: could not load spec")
+                            continue
+                        foo = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(foo)
+                        toolClass = _resolve_tool_class_from_module(foo, module_name)
+                        toolObj = Tool(toolClass)
+                        newToolsImported.append(toolObj)
+                        if toolObj.create_resource_cost is not None:
+                            self.budget_manager.add_to_resource_budget(toolObj.create_resource_cost)
+                        if toolObj.create_expense_cost is not None:
+                            self.budget_manager.add_to_resource_budget(toolObj.create_expense_cost)
+                    except Exception as e:
+                        print(f"Skipping invalid tool module {module_name!r} ({path}): {e}")
         self.toolsImported = newToolsImported
 
     def runTool(self, toolName, query):
@@ -123,6 +167,10 @@ class ToolManager:
     
 
     def getTools(self):
+        # When tool invocation is off, do not expose declarations to the model — otherwise it
+        # still emits function_call parts and every call fails in runTool(), causing loops.
+        if not self.is_invocation_enabled:
+            return []
         toolsList = []
         for tool in self.toolsImported:
             parameters = types.Schema()

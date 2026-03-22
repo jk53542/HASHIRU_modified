@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Type, Any, Optional, Tuple
+from typing import Dict, Type, Any, Optional, Tuple, List
 import os
 import json
 import ollama
@@ -543,11 +543,13 @@ class AgentManager():
                 with open(MODEL_FILE_PATH, "r", encoding="utf8") as f:
                     full_models = json.loads(f.read())
 
-                # Create a simplified version with only the description and costs
+                # Include description/specialty so CEO can judge overlap before creating new agents
                 simplified_agents = {}
                 for name, data in full_models.items():
+                    desc = data.get("description", "")
                     simplified_agents[name] = {
-                        "description": data.get("description", ""),
+                        "description": desc,
+                        "specialty": desc,
                         "create_resource_cost": data.get("create_resource_cost", 0),
                         "invoke_resource_cost": data.get("invoke_resource_cost", 0),
                         "create_expense_cost": data.get("create_expense_cost", 0),
@@ -698,6 +700,89 @@ class AgentManager():
         return (result,
                 self.budget_manager.get_current_remaining_resource_budget(),
                 self.budget_manager.get_current_remaining_expense_budget())
+
+    def ask_multiple_agents(
+        self,
+        agent_prompts: list,
+        user_question: str = "",
+        **kwargs
+    ) -> Tuple[dict, Optional[float], Optional[float], int, int]:
+        """
+        Ask multiple agents (each with its own prompt), then compute semantic metrics
+        over ALL responses from ALL agents. Use this when the CEO delegates one question
+        to several agents (e.g. medical + robotics); entropy/density reflect agreement
+        across the full set of answers.
+
+        agent_prompts: list of dicts with keys "agent_name" and "prompt"
+        user_question: overall question (used for metrics); if empty, first prompt is used.
+
+        Returns: (result_dict, semantic_entropy, semantic_density, resource_budget, expense_budget)
+        result_dict has "combined_output", "per_agent_outputs", "semantic_entropy", "semantic_density".
+        """
+        if not agent_prompts:
+            raise ValueError("agent_prompts must be a non-empty list of {agent_name, prompt}")
+        primaries = []
+        all_individual_responses = []
+        per_agent_outputs = []
+
+        for item in agent_prompts:
+            name = item.get("agent_name")
+            prompt = item.get("prompt", "")
+            if not name or not prompt:
+                continue
+            agent = self.get_agent(name)
+            if not self.is_local_invocation_enabled and agent.get_type() == "local":
+                raise ValueError("Local invocation mode is disabled.")
+            if not self.is_cloud_invocation_enabled and agent.get_type() == "cloud":
+                raise ValueError("Cloud invocation mode is disabled.")
+            n_tokens = len(prompt.split()) / 1000000
+            self.validate_budget(agent.invoke_resource_cost, agent.invoke_expense_cost * n_tokens)
+            self.budget_manager.add_to_expense_budget(agent.invoke_expense_cost * n_tokens)
+            result = agent.ask_agent(prompt)
+            text = result.get("text") if isinstance(result, dict) else result
+            text = (text or "").strip()
+            n_out = len((text or "").split()) / 1000000
+            self.budget_manager.add_to_expense_budget(agent.output_expense_cost * n_out)
+            primaries.append((name, text))
+            all_individual_responses.append(text)
+            per_agent_outputs.append({"agent_name": name, "prompt": prompt, "response": text})
+
+            # Extra samples from this agent for semantic metrics (same agent, same prompt)
+            extra = self.get_agent_responses(name, prompt, NUM_EXTRA_RESPONSES_FOR_SEMANTIC)
+            all_individual_responses.extend(extra)
+
+        combined_response = "\n\n".join(
+            f"**{name}:**\n{text}" for name, text in primaries
+        )
+        metrics_prompt = user_question.strip() or (agent_prompts[0].get("prompt", ""))
+
+        entropy, density = None, None
+        if len(all_individual_responses) >= 1:
+            try:
+                both = compute_semantic_metrics_both(
+                    prompt=metrics_prompt,
+                    response=combined_response,
+                    samples=all_individual_responses,
+                )
+                entropy = both.get("entropy")
+                density = both.get("density")
+            except Exception as e:
+                self.logger.warning("Semantic metric compute failed for multi-agent: %s", e)
+
+        result_dict = {
+            "text": combined_response,
+            "combined_output": combined_response,
+            "per_agent_outputs": per_agent_outputs,
+            "semantic_entropy": entropy,
+            "semantic_density": density,
+        }
+        return (
+            result_dict,
+            entropy,
+            density,
+            self.budget_manager.get_current_remaining_resource_budget(),
+            self.budget_manager.get_current_remaining_expense_budget(),
+        )
 
     # @@ NEW FUNCTION
     def evaluate_agent_score(self, agent_name, recent_n=10):

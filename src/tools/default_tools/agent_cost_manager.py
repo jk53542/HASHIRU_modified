@@ -6,7 +6,11 @@ class AgentCostManager():
 
     inputSchema = {
         "name": "AgentCostManager",
-        "description": "Retrieves the cost of creating and invoking an agent. Also includes the strengths of each model. Please make sure to use this before creating an agent.",
+        "description": (
+            "Retrieves the cost of creating and invoking an agent and the strengths of each model. "
+            "Preferred models for local, open-source use: DeepSeek and Llama (small, run locally). "
+            "Use before creating an agent to pick a model."
+        ),
         "parameters": {
             "type": "object",
             "properties": {},
@@ -15,8 +19,13 @@ class AgentCostManager():
     }
 
     costs = {
+        "deepseek-r1": {
+            "description": "[PREFERRED - local, open-source] Avg Accuracy: 77.3%, Latency: 120s, 69.9% on LegalBench, 71.1% on multi-task understanding, 92.2% on Math",
+            "create_resource_cost": 0.2,
+            "invoke_resource_cost": 0.4,
+        },
         "llama3.2": {
-            "description": "Avg Accuracy: 49.75%, Latency 0.9s, 63.4% on multi-task understanding, 40.8% on rewriting, 78.6% on reasoning.",
+            "description": "[PREFERRED - local, open-source] Avg Accuracy: 49.75%, Latency 0.9s, 63.4% on multi-task understanding, 40.8% on rewriting, 78.6% on reasoning.",
             "create_resource_cost": 0.1,
             "invoke_resource_cost": 0.2,
         },
@@ -24,11 +33,6 @@ class AgentCostManager():
             "description": "Avg Accuracy: 51.3%, Latency 9.7s, 51% on LegalBench, 60.1% on multi-task understanding, 69.9% on TriviaQA, 67.9% on reasoning",
             "create_resource_cost": 20,
             "invoke_resource_cost": 100,
-        },
-        "deepseek-r1": {
-            "description": "Avg Accuracy: 77.3%, Latency: 120s, 69.9% on LegalBench, 71.1% on multi-task understanding, 92.2% on Math",
-            "create_resource_cost": 0.2,
-            "invoke_resource_cost": 0.4,
         },
         "gemini-2.5-flash-preview-05-20": {
             "description": "Avg Accuracy: 75.8%, 82.8% on LegalBench, 81.6% on multi-task understanding, 91.6% on Math",
@@ -66,8 +70,8 @@ class AgentCostManager():
             "invoke_expense_cost": 0.0375,
             "output_expense_cost": 0.15,
         },
-        "groq-qwen-qwq-32b": {
-            "description": "79.5% on AIME24, is comparable to o1-mini and DeepSeek-R1 on all reasonig tasks",
+        "groq-llama-3.3-70b-versatile": {
+            "description": "Groq-hosted Llama 3.3 70B (replaces deprecated qwen-qwq-32b)",
             "create_expense_cost": 0,
             "invoke_expense_cost": 0.29,
             "output_expense_cost": 0.39,

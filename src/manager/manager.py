@@ -3,6 +3,7 @@ from typing import List
 from google import genai
 from google.genai import types
 from google.genai.types import *
+import ast
 import os
 from dotenv import load_dotenv
 import sys
@@ -24,6 +25,28 @@ import traceback
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler(sys.stdout)
+
+# Gradio 5 walks message content and treats nested dict/list values like file paths.
+# Prefix + JSON keeps tool/function_call payloads as plain strings (no path traversal).
+INTERNAL_TOOL_JSON_PREFIX = "hashiru-internal-json:"
+
+
+def _encode_internal_tool_payload(obj) -> str:
+    return INTERNAL_TOOL_JSON_PREFIX + json.dumps(obj, default=str, ensure_ascii=False)
+
+
+def _decode_internal_tool_payload(content):
+    """Return list/dict payload for tool/function_call roles, or None if not our format."""
+    if isinstance(content, list):
+        return content
+    if not isinstance(content, str) or not content:
+        return None
+    if content.startswith(INTERNAL_TOOL_JSON_PREFIX):
+        try:
+            return json.loads(content[len(INTERNAL_TOOL_JSON_PREFIX) :])
+        except json.JSONDecodeError:
+            return None
+    return None
 # handler.setLevel(logging.DEBUG)
 logger.addHandler(handler)
 
@@ -64,6 +87,10 @@ class GeminiManager:
         with open(system_prompt_file, 'r', encoding="utf8") as f:
             self.system_prompt = f.read()
         self.messages = []
+        self.max_tool_rounds = int(os.getenv("HASHIRU_MAX_TOOL_ROUNDS", "12"))
+        self.max_same_tool_call_repeats = int(
+            os.getenv("HASHIRU_MAX_SAME_TOOL_CALL_REPEATS", "4")
+        )
         self.set_modes(modes)
         self.safety_settings = [
             {
@@ -200,12 +227,22 @@ class GeminiManager:
             parts.append(tool_content)
             i += 1
         self.output_tokens += len(repr(parts).split())
+        # Persist as plain data instead of repr(...) to avoid eval/parsing failures.
+        payload = []
+        for p in parts:
+            try:
+                if getattr(p, "function_response", None):
+                    fr = p.function_response
+                    payload.append({
+                        "kind": "function_response",
+                        "name": fr.name,
+                        "response": fr.response,
+                    })
+            except Exception:
+                continue
         yield {
             "role": "tool",
-            "content": repr(types.Content(
-                    role='model' if self.model_name == "gemini-2.5-pro-exp-03-25" else 'tool',
-                    parts=parts
-            ))
+            "content": _encode_internal_tool_payload(payload),
         }
 
     def format_chat_history(self, messages=[]):
@@ -248,13 +285,82 @@ class GeminiManager:
                             text="Here are the relevant memories for the user's query: "+message.get("content", ""))]
                     case "tool":
                         role = "tool"
-                        formatted_history.append(
-                            eval(message.get("content", "")))
+                        content = message.get("content", "")
+                        # Decode Gradio-safe string payloads (see INTERNAL_TOOL_JSON_PREFIX).
+                        decoded = _decode_internal_tool_payload(content)
+                        if decoded is None and isinstance(content, str):
+                            try:
+                                maybe = json.loads(content)
+                                if isinstance(maybe, list):
+                                    decoded = maybe
+                            except json.JSONDecodeError:
+                                pass
+                        if decoded is not None:
+                            content = decoded
+                        # List of serialized function responses.
+                        if isinstance(content, list):
+                            tool_parts = []
+                            for item in content:
+                                if not isinstance(item, dict):
+                                    continue
+                                if item.get("kind") != "function_response":
+                                    continue
+                                try:
+                                    tool_parts.append(types.Part.from_function_response(
+                                        name=item.get("name", ""),
+                                        response=item.get("response", {})
+                                    ))
+                                except Exception:
+                                    continue
+                            if tool_parts:
+                                formatted_history.append(types.Content(role="tool", parts=tool_parts))
+                        # Backward compatibility with older saved repr(...) content.
+                        elif isinstance(content, str):
+                            try:
+                                parsed = ast.literal_eval(content)
+                                if isinstance(parsed, types.Content):
+                                    formatted_history.append(parsed)
+                            except Exception:
+                                logger.warning("Skipping unparsable tool content in chat history.")
                         continue
                     case "function_call":
                         role = "model"
-                        formatted_history.append(
-                            eval(message.get("content", "")))
+                        content = message.get("content", "")
+                        decoded = _decode_internal_tool_payload(content)
+                        if decoded is None and isinstance(content, str):
+                            try:
+                                maybe = json.loads(content)
+                                if isinstance(maybe, list):
+                                    decoded = maybe
+                            except json.JSONDecodeError:
+                                pass
+                        if decoded is not None:
+                            content = decoded
+                        # Serialized function-call parts.
+                        if isinstance(content, list):
+                            call_parts = []
+                            for item in content:
+                                if not isinstance(item, dict):
+                                    continue
+                                if item.get("kind") != "function_call":
+                                    continue
+                                try:
+                                    call_parts.append(types.Part.from_function_call(
+                                        name=item.get("name", ""),
+                                        args=item.get("args", {}) or {},
+                                    ))
+                                except Exception:
+                                    continue
+                            if call_parts:
+                                formatted_history.append(types.Content(role="model", parts=call_parts))
+                        # Backward compatibility with older saved repr(...) content.
+                        elif isinstance(content, str):
+                            try:
+                                parsed = ast.literal_eval(content)
+                                if isinstance(parsed, types.Content):
+                                    formatted_history.append(parsed)
+                            except Exception:
+                                logger.warning("Skipping unparsable function_call content in chat history.")
                         continue
                     case _:
                         role = "model"
@@ -317,11 +423,21 @@ class GeminiManager:
                     yield messages
         except Exception as e:
             pass
-        yield from self.invoke_manager(messages)
+        yield from self.invoke_manager(messages, tool_round=0, tool_call_counts={})
         print("Tokens used: Input: {}, Output: {}".format(
             self.input_tokens, self.output_tokens))
 
-    def invoke_manager(self, messages):
+    def _function_call_signature(self, function_call):
+        try:
+            args = function_call.args if function_call.args is not None else {}
+            args_key = json.dumps(args, sort_keys=True, default=str)
+        except Exception:
+            args_key = str(function_call.args)
+        return f"{function_call.name}|{args_key}"
+
+    def invoke_manager(self, messages, tool_round=0, tool_call_counts=None):
+        if tool_call_counts is None:
+            tool_call_counts = {}
         chat_history = self.format_chat_history(messages)
         logger.debug(f"Chat history: {chat_history}")
         try:
@@ -343,14 +459,21 @@ class GeminiManager:
                 for candidate in chunk.candidates:
                     if candidate.content and candidate.content.parts:
                         has_function_call = False
+                        serialized_calls = []
                         for part in candidate.content.parts:
                             if part.function_call:
                                 has_function_call = True
                                 function_calls.append(part.function_call)
+                                serialized_calls.append({
+                                    "kind": "function_call",
+                                    "name": part.function_call.name,
+                                    "args": part.function_call.args,
+                                })
                         if has_function_call:
                             function_call_requests.append({
                                 "role": "function_call",
-                                "content": repr(candidate.content),
+                                "content": _encode_internal_tool_payload(
+                                    serialized_calls),
                             })
             if full_text.strip() != "":
                 messages.append({
@@ -390,11 +513,48 @@ class GeminiManager:
             })
 
         if function_calls and len(function_calls) > 0:
+            if tool_round >= self.max_tool_rounds:
+                messages.append({
+                    "role": "assistant",
+                    "content": (
+                        "Stopping due to tool-loop guard: maximum tool rounds reached. "
+                        "Please return a final answer without more tool calls."
+                    ),
+                    "metadata": {"title": "Tool-loop guard"},
+                })
+                yield messages
+                return
+
+            # Prevent infinite loops from repeating exactly the same tool invocation.
+            repeated_signature = None
+            for fc in function_calls:
+                sig = self._function_call_signature(fc)
+                new_count = tool_call_counts.get(sig, 0) + 1
+                tool_call_counts[sig] = new_count
+                if new_count > self.max_same_tool_call_repeats:
+                    repeated_signature = sig
+                    break
+            if repeated_signature is not None:
+                messages.append({
+                    "role": "assistant",
+                    "content": (
+                        "Stopping due to repeated identical tool calls. "
+                        "Please provide the final answer directly now."
+                    ),
+                    "metadata": {"title": "Repeated-tool-call guard"},
+                })
+                yield messages
+                return
+
             for call in self.handle_tool_calls(function_calls):
                 yield messages + [call]
                 if (call.get("role") == "tool"
                         or (call.get("role") == "assistant" and call.get("metadata", {}).get("status") == "done")):
                     messages.append(call)
-            yield from self.invoke_manager(messages)
+            yield from self.invoke_manager(
+                messages,
+                tool_round=tool_round + 1,
+                tool_call_counts=tool_call_counts,
+            )
         else:
             yield messages

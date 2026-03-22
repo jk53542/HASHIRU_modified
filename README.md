@@ -92,6 +92,24 @@ The project supports the following language model integrations:
 - **Groq**: Cloud-based model management and invocation from Groq.
 - **Lambda**: Cloud-based model management and invocation from Lambda Labs.
 
+## Troubleshooting
+
+### Pip “dependency conflicts” after `pip install -r requirements.txt`
+
+If `pip` reports conflicts with **bfcl-eval**, **litellm**, **mysql-connector-python**, **anthropic**, etc., those packages are almost certainly from **another project** installed in the **same** virtualenv (e.g. AgentBench / BFCL). HASHIRU’s `requirements.txt` does not install them.
+
+**Fix:** Use a **dedicated** venv only for HASHIRU, or remove bench-only packages from that env. Confirm you are using the intended interpreter: `which python` and `pip -V` should both point to the same `.venv` under your HASHIRU project directory (not a different path like `hashiru_test/HASHIRU` while editing `hashiru_modified`).
+
+### Gradio errors: `InvalidPathError`, `File name too long`, or UI stuck on Memories / tools
+
+Gradio 5 scans chat payloads for files to cache. **Nested** tool payloads (`function_call` / `function_response` dicts) were mis-detected as paths. This repo encodes those payloads as prefixed JSON strings in `manager.py` so the UI stays safe.
+
+If you still see errors, **start a new chat** (old saved history may contain pre-fix nested structures).
+
+### `429 RESOURCE_EXHAUSTED` from Google Gemini
+
+That is **API quota / rate limiting**, not a Gradio bug. Wait and retry, reduce calls, switch model, or check Google AI / Vertex quotas.
+
 ## Acknowledgements
 We would like to thank Hugging Face, Groq and Lambda Labs for sponsoring this project and providing the necessary resources for development.
 

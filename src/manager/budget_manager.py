@@ -9,8 +9,9 @@ class BudgetManager():
     total_expense_budget = 10
     current_expense = 0
     is_budget_initialized = False
-    is_resource_budget_enabled = True
-    is_expense_budget_enabled = True
+    # Disabled by default so budget does not block creation or invocation; enable via set_*_budget_status(True) if needed.
+    is_resource_budget_enabled = False
+    is_expense_budget_enabled = False
     
     def __init__(self):
         if not self.is_budget_initialized:
@@ -18,11 +19,11 @@ class BudgetManager():
             self.is_budget_initialized = True
     
     def set_resource_budget_status(self, status: bool):
-        self.is_enabled = status
+        self.is_resource_budget_enabled = status
         if status:
-            print("Budget manager is enabled.")
+            print("Resource budget manager is enabled.")
         else:
-            print("Budget manager is disabled.")
+            print("Resource budget manager is disabled.")
     
     def set_expense_budget_status(self, status: bool):
         self.is_expense_budget_enabled = status

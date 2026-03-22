@@ -153,6 +153,24 @@ css = """
 """
 
 
+def _chat_preview_for_gradio(messages):
+    """
+    Gradio ChatInterface streams (message, history) and diffs consecutive states.
+    We must yield on *every* step from the manager. Steps whose last entry is
+    `function_call` or `tool` were previously skipped, which left large gaps in
+    the stream and could crash Gradio's diff (utils.compare_objects IndexError).
+    """
+    if not messages:
+        return {"role": "assistant", "content": ""}
+    last = messages[-1]
+    if last.get("role") == "assistant":
+        return last
+    for m in reversed(messages):
+        if m.get("role") == "assistant":
+            return m
+    return {"role": "assistant", "content": ""}
+
+
 def run_model(message, history):
     if 'text' in message:
         if message['text'].strip() != "":
@@ -168,8 +186,7 @@ def run_model(message, history):
             })
     yield "", history
     for messages in model_manager.run(history):
-        if messages[-1]["role"] == "assistant":
-            yield messages[-1], messages
+        yield _chat_preview_for_gradio(messages), messages
 
 
 with gr.Blocks() as login:
@@ -194,8 +211,10 @@ args, unknown = parser.parse_known_args()
 no_auth = args.no_auth
 
 with gr.Blocks(title="HASHIRU AI", css=css, fill_width=True, fill_height=True) as demo:
+    # Budget modes disabled by default so budget does not block agent creation or invocation.
+    _default_modes = [m for m in Mode if m not in (Mode.ENABLE_RESOURCE_BUDGET, Mode.ENABLE_ECONOMY_BUDGET)]
     model_manager = GeminiManager(
-        gemini_model="gemini-2.0-flash", modes=[mode for mode in Mode])
+        gemini_model="gemini-2.0-flash", modes=_default_modes)
 
     def update_model(modeIndexes: List[int]):
         modes = [Mode(i+1) for i in modeIndexes]

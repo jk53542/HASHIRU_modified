@@ -17,7 +17,11 @@ class ToolCreator():
                 },
                 "tool_code": {
                     "type": "string",
-                    "description": "The code of the tool to create",
+                    "description": (
+                        "Python source for a tool class. Must define a class with "
+                        "`inputSchema` (dict) and `run(self, **kwargs)`, and "
+                        "`__all__ = ['YourClassName']` at module top (see WordCountExtractor.py)."
+                    ),
                 },
             },
             "required": ["name", "tool_code"],

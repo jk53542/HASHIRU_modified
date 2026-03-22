@@ -7,7 +7,12 @@ class GetAgents():
 
     inputSchema = {
         "name": "GetAgents",
-        "description": "Retrieves a list of available AI agents. This tool is used to get the list of available models that can be invoked using the AskAgent tool.",
+        "description": (
+            "Retrieves all available AI agents with name, description (specialty), and base_model. "
+            "Use this to check whether an existing agent's specialty already covers a task before creating a new agent; "
+            "avoid creating near-duplicate agents (e.g. ReservationAssistant vs ReservationInvestigator). "
+            "Agents can be invoked with AskAgent (single agent) or AskMultipleAgents (multiple agents for one question)."
+        ),
         "parameters": {
             "type": "object",
             "properties": {},
