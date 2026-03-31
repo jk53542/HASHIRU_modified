@@ -172,12 +172,28 @@ def _chat_preview_for_gradio(messages):
 
 
 def run_model(message, history):
-    if 'text' in message:
-        if message['text'].strip() != "":
-            history.append({
-                "role": "user",
-                "content": message['text']
-            })
+    raw_text = ""
+    if isinstance(message, dict) and message.get("text"):
+        raw_text = message["text"]
+    try:
+        from src.manager.orchestration_trace import (
+            begin_orchestration_user_turn,
+            parse_trace_context_from_user_text,
+        )
+
+        clean_text, ctx = parse_trace_context_from_user_text(raw_text)
+        begin_orchestration_user_turn(ctx if ctx is not None else {})
+    except Exception:
+        clean_text = raw_text
+        try:
+            from src.manager.orchestration_trace import begin_orchestration_user_turn
+
+            begin_orchestration_user_turn({})
+        except Exception:
+            pass
+    if "text" in message:
+        if isinstance(message, dict) and clean_text.strip() != "":
+            history.append({"role": "user", "content": clean_text})
     if 'files' in message:
         for file in message['files']:
             history.append({

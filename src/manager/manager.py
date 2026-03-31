@@ -281,6 +281,9 @@ class GeminiManager:
                             trace_extras["worker_reprompted_after_semantic_check"] = (
                                 om.get("worker_reprompted_after_semantic_check")
                             )
+                            trace_extras["worker_invocation_index"] = om.get(
+                                "worker_invocation_index"
+                            )
                             trace_extras["semantic_quality_concern"] = om.get(
                                 "semantic_quality_concern"
                             )

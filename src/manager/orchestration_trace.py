@@ -17,6 +17,16 @@ with Linux paths. ``export VAR="~/x"`` does not expand ``~`` in bash — use ``V
 Each line is one JSON object with at least: ts (unix), event (str), plus fields. Event lines also
 include ``trace_file`` (basename) in directory mode.
 
+When a user message starts with ``[HASHIRU_TRACE_CTX]{json}\\n`` (see benchmarks using
+``benchmark_trace_context.hashiru_trace_context_prefix``), the server strips that line and attaches
+``benchmark_name``, ``question_index``, ``question_id``, and ``bench_attempt`` to every trace row
+for that CEO turn.
+
+``worker_reprompted_after_semantic_check`` is True on a worker completion when an earlier completion
+for the **same agent name** in the same user turn had ``semantic_quality_concern`` true (CEO chose
+to ask again after thresholds fired). ``worker_invocation_index`` counts that agent's completions in
+the turn (1-based).
+
 Call ``init_orchestration_trace_session()`` once at app startup (optional but recommended) to emit
 ``trace_session_start`` and create the per-session file immediately.
 """
@@ -27,8 +37,17 @@ import logging
 import os
 import threading
 import time
+from contextvars import ContextVar
 from datetime import datetime
 from typing import Any
+
+# Per user-message turn: benchmark labels + per-agent semantic-concern history (for reprompt detection).
+_orch_turn: ContextVar[dict[str, Any] | None] = ContextVar("hashiru_orch_turn", default=None)
+
+_TRACE_CTX_PREFIX = "[HASHIRU_TRACE_CTX]"
+_ALLOWED_TRACE_CTX_KEYS = frozenset(
+    {"benchmark_name", "question_index", "question_id", "bench_attempt"}
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -138,6 +157,89 @@ def init_orchestration_trace_session() -> str | None:
     return abs_path
 
 
+def _default_turn_state() -> dict[str, Any]:
+    return {
+        "benchmark_name": None,
+        "question_index": None,
+        "question_id": None,
+        "bench_attempt": None,
+        "concern_by_agent": {},
+    }
+
+
+def begin_orchestration_user_turn(meta: dict[str, Any] | None = None) -> None:
+    """
+    Reset orchestration state for one CEO user turn (one Gradio user message).
+    Optionally set benchmark_* fields copied into every trace line until the next turn.
+    """
+    st = _default_turn_state()
+    if meta:
+        for k in _ALLOWED_TRACE_CTX_KEYS:
+            if k in meta and meta[k] is not None:
+                st[k] = meta[k]
+    _orch_turn.set(st)
+
+
+def parse_trace_context_from_user_text(text: str) -> tuple[str, dict[str, Any] | None]:
+    """
+    If ``text`` starts with ``[HASHIRU_TRACE_CTX]{json}`` (JSON on the first line),
+    strip it and return (remaining_text, meta). Otherwise return (text, None).
+
+    Benchmarks prepend this so JSONL traces can be grouped by question.
+    """
+    if not text or not text.startswith(_TRACE_CTX_PREFIX):
+        return text, None
+    rest = text[len(_TRACE_CTX_PREFIX) :]
+    if "\n" in rest:
+        line, remainder = rest.split("\n", 1)
+    else:
+        line, remainder = rest, ""
+    line = line.strip()
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        return text, None
+    if not isinstance(obj, dict):
+        return text, None
+    meta = {k: obj[k] for k in _ALLOWED_TRACE_CTX_KEYS if k in obj}
+    clean = remainder.lstrip("\n")
+    return clean, meta
+
+
+def _turn_context_trace_fields() -> dict[str, Any]:
+    st = _orch_turn.get()
+    if not st:
+        return {}
+    out: dict[str, Any] = {}
+    for k in _ALLOWED_TRACE_CTX_KEYS:
+        v = st.get(k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
+def worker_invocation_reprompt_flags(
+    agent_name: str, semantic_quality_concern: bool
+) -> tuple[int, bool]:
+    """
+    Within the current user turn, track each worker's sequence of semantic_quality_concern outcomes.
+
+    Returns (worker_invocation_index_1based, worker_reprompted_after_semantic_check).
+    The reprompt flag is True when a prior completion for this agent in the same turn
+    had semantic_quality_concern True (CEO likely re-asked after thresholds fired).
+    """
+    st = _orch_turn.get()
+    if not st:
+        return 1, False
+    name = (agent_name or "").strip() or "_unknown"
+    chains: dict[str, list[bool]] = st.setdefault("concern_by_agent", {})
+    hist = chains.setdefault(name, [])
+    invocation_index = len(hist) + 1
+    reprompted = len(hist) >= 1 and bool(hist[-1])
+    hist.append(bool(semantic_quality_concern))
+    return invocation_index, reprompted
+
+
 def _truncate(val: Any, limit: int = 4000) -> Any:
     if isinstance(val, str) and len(val) > limit:
         return val[:limit] + f"...<truncated {len(val) - limit} chars>"
@@ -181,6 +283,7 @@ def log_orchestration_event(event: str, **fields: Any) -> None:
         rec: dict[str, Any] = {"ts": time.time(), "event": event}
         if _trace_basename:
             rec["trace_file"] = _trace_basename
+        rec.update(_turn_context_trace_fields())
         for k, v in fields.items():
             rec[k] = _truncate(v)
         line = json.dumps(rec, default=str, ensure_ascii=False) + "\n"

@@ -21,7 +21,10 @@ from src.manager.tool_manager import ToolManager  # if ToolManager is importable
 # OR direct import of metrics wrapper:
 from src.metrics.semantic_metrics import compute_semantic_metrics_both
 from src.manager.worker_model_policy import assert_base_model_allowed, is_base_model_allowed
-from src.manager.orchestration_trace import log_orchestration_event
+from src.manager.orchestration_trace import (
+    log_orchestration_event,
+    worker_invocation_reprompt_flags,
+)
 from src.manager.semantic_ablation import (
     SEMANTIC_DENSITY_THRESHOLD,
     SEMANTIC_ENTROPY_THRESHOLD,
@@ -933,8 +936,12 @@ class AgentManager():
             "semantic_quality_summary": ceo_followup["semantic_quality_summary"],
             "suggested_ceo_next_steps": ceo_followup["suggested_ceo_next_steps"],
             "worker_prompt_excerpt_for_ceo": ceo_followup["worker_prompt_excerpt_for_ceo"],
-            "worker_reprompted_after_semantic_check": False,
         }
+        inv_idx, reprompted = worker_invocation_reprompt_flags(
+            agent_name, bool(meta["semantic_quality_concern"])
+        )
+        meta["worker_invocation_index"] = inv_idx
+        meta["worker_reprompted_after_semantic_check"] = reprompted
         log_orchestration_event(
             "worker_answer",
             agent_name=agent_name,
@@ -942,7 +949,8 @@ class AgentManager():
             worker_prompt=prompt,
             semantic_entropy=entropy,
             semantic_density=density,
-            worker_reprompted_after_semantic_check=False,
+            worker_invocation_index=inv_idx,
+            worker_reprompted_after_semantic_check=reprompted,
             semantic_quality_concern=meta["semantic_quality_concern"],
         )
 
@@ -1036,6 +1044,8 @@ class AgentManager():
                     self.logger.warning(
                         "Per-agent semantic metrics failed for %s: %s", name, e
                     )
+            concern_i = bool(reprompt_triggered(pe, pd))
+            inv_m, rep_m = worker_invocation_reprompt_flags(name, concern_i)
             per_agent_outputs.append(
                 {
                     "agent_name": name,
@@ -1048,6 +1058,9 @@ class AgentManager():
                     "metrics_diagnostics": pediag,
                     "semantic_ablation": flags_dict(),
                     "sequence_logprobs": seq_i,
+                    "semantic_quality_concern": concern_i,
+                    "worker_invocation_index": inv_m,
+                    "worker_reprompted_after_semantic_check": rep_m,
                 }
             )
             log_orchestration_event(
@@ -1058,6 +1071,9 @@ class AgentManager():
                 user_question=user_question or None,
                 semantic_entropy=pe,
                 semantic_density=pd,
+                semantic_quality_concern=concern_i,
+                worker_invocation_index=inv_m,
+                worker_reprompted_after_semantic_check=rep_m,
             )
 
         combined_response = "\n\n".join(

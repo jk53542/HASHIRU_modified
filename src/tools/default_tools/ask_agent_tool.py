@@ -65,6 +65,7 @@ class AskAgent():
             worker_prompt=prompt,
             semantic_entropy=orch_meta.get("semantic_entropy"),
             semantic_density=orch_meta.get("semantic_density"),
+            worker_invocation_index=orch_meta.get("worker_invocation_index"),
             worker_reprompted_after_semantic_check=orch_meta.get(
                 "worker_reprompted_after_semantic_check"
             ),
