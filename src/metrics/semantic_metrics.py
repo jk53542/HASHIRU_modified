@@ -4,6 +4,17 @@ Wrapper module exposing compute_semantic_entropy(...) and compute_semantic_densi
 to the rest of HASHIRU. Calls out to separate services (semantic_uncertainty and
 semantic-density) running in their own environments to avoid dependency conflicts.
 See INTEGRATION_SEMANTIC_METRICS.md for required inputs and how to run the services.
+
+**Sequence log-likelihoods (open-weight via Ollama):**
+For Ollama-backed agents whose **base model** is an open-weight family we support
+(e.g. DeepSeek-R1, Llama 3.2), HASHIRU can attach **summed chosen-token log-probs**
+(one float per completion) when `HASHIRU_OLLAMA_LOGPROBS` is enabled and the local
+Ollama build exposes chat `logprobs`. Those values are sent to the metrics gateway
+inside **`metadata["sequence_logprobs"]`**, aligned with `[primary_response] + samples`
+so backends may use them without replacing the multi-sample pipeline.
+
+**Other providers:** Cloud APIs may not return comparable logprobs; the text-sample
+path remains the default for entropy/density.
 """
 
 import os
@@ -23,12 +34,41 @@ METRICS_SERVICE_URL = os.getenv("HASHIRU_METRICS_SERVICE_URL", "http://127.0.0.1
 METRICS_TIMEOUT = int(os.getenv("HASHIRU_METRICS_TIMEOUT", "120"))
 
 
+def _maybe_trim_for_metrics(text: str) -> str:
+    """
+    If HASHIRU_SEMANTIC_METRICS_TEXT_TAIL_CHARS is a positive integer, keep only the last N
+    characters of each string sent to entropy/density. Useful when long shared reasoning
+    prefixes swamp embedding/entailment signal but the conclusion differs at the end.
+    """
+    raw = os.getenv("HASHIRU_SEMANTIC_METRICS_TEXT_TAIL_CHARS", "").strip()
+    if not raw:
+        return text
+    try:
+        n = int(raw)
+    except ValueError:
+        return text
+    if n <= 0 or not isinstance(text, str):
+        return text
+    t = text.strip()
+    return t[-n:] if len(t) > n else t
+
+
 def _build_payload(prompt: str, response: str, samples: list = None, **kwargs) -> dict:
     """Build JSON payload for the metrics service. responses = [response]; samples = [samples] per response."""
+    response = _maybe_trim_for_metrics(response or "")
+    trimmed_samples = (
+        [_maybe_trim_for_metrics(s) for s in samples] if samples else None
+    )
     responses = [response]
     # Service expects samples[i] to align with responses[i]. One response -> one list of samples.
-    sample_lists = [list(samples)] if samples else None
-    metadata = kwargs.get("metadata") if isinstance(kwargs.get("metadata"), dict) else {}
+    sample_lists = [list(trimmed_samples)] if trimmed_samples else None
+    metadata: dict = {}
+    md = kwargs.get("metadata")
+    if isinstance(md, dict):
+        metadata = dict(md)
+    seq = kwargs.get("sequence_logprobs")
+    if seq is not None:
+        metadata["sequence_logprobs"] = seq
     return {
         "prompt": prompt,
         "responses": responses,
@@ -82,6 +122,10 @@ def compute_semantic_metrics_both(prompt: str, response: str, samples: list = No
         out["clusters"] = reasons.get("clusters")
         out["kernel_values"] = reasons.get("kernel_values")
         out["sample_count"] = len(samples) if samples else reasons.get("n")
+        if reasons.get("entropy_modes") is not None:
+            out["diagnostics"]["entropy_modes"] = reasons["entropy_modes"]
+        if reasons.get("used_sequence_logprobs") is not None:
+            out["diagnostics"]["used_sequence_logprobs"] = reasons["used_sequence_logprobs"]
     except Exception as e:
         logger.warning("Metrics gateway request failed: %s", e)
         out["diagnostics"]["error"] = str(e)

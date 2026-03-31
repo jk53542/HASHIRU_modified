@@ -1,5 +1,7 @@
 __all__ = ['AgentCostManager']
 
+from src.manager.worker_model_policy import get_effective_allowlist, policy_summary
+
 
 class AgentCostManager():
     dependencies = []
@@ -82,14 +84,26 @@ class AgentCostManager():
             "invoke_expense_cost": 0.025,
             "output_expense_cost": 0.04,
         },
+        "chatgpt-5.4": {
+            "description": "OpenAI-hosted ChatGPT 5.4 (remote API); supports strong reasoning and optional logprobs path",
+            "create_expense_cost": 0,
+            "invoke_expense_cost": 1.25,
+            "output_expense_cost": 10.00,
+        },
     }
 
     def get_costs(self):
-        return self.costs
+        allow = get_effective_allowlist()
+        if allow is None:
+            return self.costs
+        return {k: v for k, v in self.costs.items() if k in allow}
 
     def run(self, **kwargs):
-        return {
+        filtered = self.get_costs()
+        out = {
             "status": "success",
             "message": "Cost of creating and invoking an agent",
-            "output": self.costs,
+            "output": filtered,
+            "worker_model_policy": policy_summary(),
         }
+        return out

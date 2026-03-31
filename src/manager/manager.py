@@ -22,6 +22,7 @@ import backoff
 import mimetypes
 import json
 import traceback
+from src.manager.orchestration_trace import log_orchestration_event
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler(sys.stdout)
@@ -29,6 +30,8 @@ handler = logging.StreamHandler(sys.stdout)
 # Gradio 5 walks message content and treats nested dict/list values like file paths.
 # Prefix + JSON keeps tool/function_call payloads as plain strings (no path traversal).
 INTERNAL_TOOL_JSON_PREFIX = "hashiru-internal-json:"
+
+_WORKER_TOOLS = frozenset({"AskAgent", "AskMultipleAgents"})
 
 
 def _encode_internal_tool_payload(obj) -> str:
@@ -47,6 +50,69 @@ def _decode_internal_tool_payload(content):
         except json.JSONDecodeError:
             return None
     return None
+
+
+def _env_truthy(name: str) -> bool:
+    v = os.environ.get(name, "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _index_last_user_with_agent_mandate(messages) -> int:
+    """Index of the latest user message that requires worker delegation (benchmark convention)."""
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") != "user":
+            continue
+        c = messages[i].get("content", "")
+        if not isinstance(c, str):
+            continue
+        if "IMPORTANT CEO INSTRUCTIONS" in c or "You MUST use agents" in c:
+            return i
+    return -1
+
+
+def _messages_segment_for_worker_check(messages) -> list:
+    """
+    Messages after the user turn that mandates agents, or after last user if HASHIRU_REQUIRE_ASK_AGENT.
+    """
+    idx = _index_last_user_with_agent_mandate(messages)
+    if idx >= 0:
+        return messages[idx + 1 :]
+    if _env_truthy("HASHIRU_REQUIRE_ASK_AGENT"):
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user":
+                return messages[i + 1 :]
+    return []
+
+
+def _segment_used_worker_agent(segment: list) -> bool:
+    for m in segment:
+        if m.get("role") == "function_call":
+            dec = _decode_internal_tool_payload(m.get("content"))
+            if isinstance(dec, list):
+                for item in dec:
+                    if (
+                        item.get("kind") == "function_call"
+                        and item.get("name") in _WORKER_TOOLS
+                    ):
+                        return True
+        if m.get("role") == "tool":
+            dec = _decode_internal_tool_payload(m.get("content"))
+            if isinstance(dec, list):
+                for item in dec:
+                    if (
+                        item.get("kind") == "function_response"
+                        and item.get("name") in _WORKER_TOOLS
+                    ):
+                        return True
+    return False
+
+
+def _mandate_worker_enforcement_active(messages) -> bool:
+    if _index_last_user_with_agent_mandate(messages) >= 0:
+        return True
+    return _env_truthy("HASHIRU_REQUIRE_ASK_AGENT")
+
+
 # handler.setLevel(logging.DEBUG)
 logger.addHandler(handler)
 
@@ -189,6 +255,89 @@ class GeminiManager:
                     "message": f"Tool `{function_call.name}` failed to run.",
                     "output": str(e),
                 }
+            try:
+                if isinstance(toolResponse, dict):
+                    trace_extras: dict = {}
+                    if function_call.name == "AskAgent":
+                        # Explicitly trace which worker was called for easier downstream analysis.
+                        called_name = None
+                        try:
+                            called_name = (function_call.args or {}).get("agent_name")
+                        except Exception:
+                            called_name = None
+                        if called_name:
+                            trace_extras["called_agent_names"] = [called_name]
+                            trace_extras["called_agent_count"] = 1
+                        om = toolResponse.get("orchestration_meta")
+                        if isinstance(om, dict):
+                            trace_extras["agent_name"] = om.get("agent_name")
+                            trace_extras["worker_prompt"] = om.get("worker_prompt")
+                            trace_extras["semantic_entropy"] = om.get(
+                                "semantic_entropy"
+                            )
+                            trace_extras["semantic_density"] = om.get(
+                                "semantic_density"
+                            )
+                            trace_extras["worker_reprompted_after_semantic_check"] = (
+                                om.get("worker_reprompted_after_semantic_check")
+                            )
+                            trace_extras["semantic_quality_concern"] = om.get(
+                                "semantic_quality_concern"
+                            )
+                    if function_call.name == "AskMultipleAgents":
+                        # Track agent list explicitly (not only nested in per_agent_outputs).
+                        called_names = []
+                        try:
+                            raw_ap = (function_call.args or {}).get("agent_prompts_json")
+                            if isinstance(raw_ap, str) and raw_ap.strip():
+                                parsed_ap = json.loads(raw_ap)
+                                if isinstance(parsed_ap, list):
+                                    for item in parsed_ap:
+                                        if isinstance(item, dict):
+                                            n = item.get("agent_name")
+                                            if isinstance(n, str) and n.strip():
+                                                called_names.append(n.strip())
+                        except Exception:
+                            pass
+                        if not called_names:
+                            try:
+                                pa = toolResponse.get("per_agent_outputs") or []
+                                if isinstance(pa, list):
+                                    for item in pa:
+                                        if isinstance(item, dict):
+                                            n = item.get("agent_name")
+                                            if isinstance(n, str) and n.strip():
+                                                called_names.append(n.strip())
+                            except Exception:
+                                pass
+                        if called_names:
+                            # Preserve order while de-duplicating.
+                            dedup = list(dict.fromkeys(called_names))
+                            trace_extras["called_agent_names"] = dedup
+                            trace_extras["called_agent_count"] = len(dedup)
+                        if toolResponse.get("semantic_metric_scope") is not None:
+                            trace_extras["semantic_metric_scope"] = toolResponse.get(
+                                "semantic_metric_scope"
+                            )
+                        trace_extras["semantic_entropy"] = toolResponse.get(
+                            "semantic_entropy"
+                        )
+                        trace_extras["semantic_density"] = toolResponse.get(
+                            "semantic_density"
+                        )
+                        trace_extras["per_agent_outputs"] = toolResponse.get(
+                            "per_agent_outputs"
+                        )
+                    log_orchestration_event(
+                        "ceo_tool_finished",
+                        tool=function_call.name,
+                        status=toolResponse.get("status"),
+                        message=toolResponse.get("message"),
+                        args=function_call.args,
+                        **trace_extras,
+                    )
+            except Exception:
+                logger.debug("orchestration trace logging failed", exc_info=True)
             logger.debug(f"Tool Response: {toolResponse}")
             thinking += f"Tool responded with \n```json\n{format_tool_response(toolResponse)}\n```\n"
             yield {
@@ -435,9 +584,12 @@ class GeminiManager:
             args_key = str(function_call.args)
         return f"{function_call.name}|{args_key}"
 
-    def invoke_manager(self, messages, tool_round=0, tool_call_counts=None):
+    def invoke_manager(self, messages, tool_round=0, tool_call_counts=None, mandate_nudges=0):
         if tool_call_counts is None:
             tool_call_counts = {}
+        max_agent_mandate_nudges = int(
+            os.environ.get("HASHIRU_MANDATE_ASK_AGENT_MAX_NUDGES", "4")
+        )
         chat_history = self.format_chat_history(messages)
         logger.debug(f"Chat history: {chat_history}")
         try:
@@ -555,6 +707,41 @@ class GeminiManager:
                 messages,
                 tool_round=tool_round + 1,
                 tool_call_counts=tool_call_counts,
+                mandate_nudges=mandate_nudges,
             )
         else:
+            agents_enabled = self.check_mode(Mode.ENABLE_LOCAL_AGENTS) or self.check_mode(
+                Mode.ENABLE_CLOUD_AGENTS
+            )
+            seg = _messages_segment_for_worker_check(messages)
+            if (
+                agents_enabled
+                and _mandate_worker_enforcement_active(messages)
+                and seg
+                and full_text.strip()
+                and not _segment_used_worker_agent(seg)
+                and mandate_nudges < max_agent_mandate_nudges
+            ):
+                logger.info(
+                    "Worker mandate: CEO produced text without AskAgent/AskMultipleAgents; nudging (n=%s/%s).",
+                    mandate_nudges + 1,
+                    max_agent_mandate_nudges,
+                )
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "SYSTEM (enforcement): You replied without calling AskAgent or AskMultipleAgents. "
+                        "This user turn requires delegating the question to at least one worker agent. "
+                        "Call GetAgents if needed, then AskAgent or AskMultipleAgents, and base your final "
+                        "answer on the worker output. Do not answer from the orchestrator model alone."
+                    ),
+                })
+                yield messages
+                yield from self.invoke_manager(
+                    messages,
+                    tool_round=tool_round,
+                    tool_call_counts=tool_call_counts,
+                    mandate_nudges=mandate_nudges + 1,
+                )
+                return
             yield messages

@@ -1,4 +1,5 @@
 from src.manager.agent_manager import AgentManager
+from src.manager.orchestration_trace import log_orchestration_event
 from src.tools.default_tools.agent_cost_manager import AgentCostManager
 __all__ = ['AgentCreator']
 
@@ -76,7 +77,16 @@ class AgentCreator():
                 "message": f"Error occurred: {str(e)}",
                 "output": None
             }
-        
+
+        log_orchestration_event(
+            "ceo_create_agent",
+            agent_name=agent_name,
+            base_model=base_model,
+            worker_prompt=None,
+            semantic_entropy=None,
+            semantic_density=None,
+            description=description,
+        )
         return {
             "status": "success",
             "message": "Agent successfully created",

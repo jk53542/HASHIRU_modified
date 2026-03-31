@@ -1,4 +1,5 @@
 from src.manager.agent_manager import AgentManager
+from src.manager.orchestration_trace import log_orchestration_event
 
 __all__ = ['FireAgent']
 
@@ -37,9 +38,16 @@ class FireAgent():
                 "output": None
             }
 
+        log_orchestration_event(
+            "ceo_fire_agent",
+            agent_name=agent_name,
+            worker_prompt=None,
+            semantic_entropy=None,
+            semantic_density=None,
+        )
         return {
             "status": "success",
             "message": "Agent successfully fired.",
             "remaining_resource_budget": remaining_resource_budget,
-            "remaining_expense_budget": remaining_expense_budget
+            "remaining_expense_budget": remaining_expense_budget,
         }

@@ -5,7 +5,11 @@ class SemanticMetricsTool:
     dependencies = []   # @@ REQUIRED by HASHIRU's tool loader
     inputSchema = {
         "name": "compute_semantic_metrics",
-        "description": "Compute semantic entropy and semantic density for a (prompt, response) pair.",
+        "description": (
+            "Compute semantic entropy and semantic density for a (prompt, response) pair. "
+            "Respects HASHIRU_ENABLE_SEMANTIC_ENTROPY / HASHIRU_ENABLE_SEMANTIC_DENSITY (see semantic_ablation.py); "
+            "if both are off, the tool skips the metrics service and returns nulls."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -68,7 +72,32 @@ class SemanticMetricsTool:
                 "output": {"error": "missing prompt or response"}
             }
 
+        from src.manager.semantic_ablation import (
+            apply_ablation_to_metrics,
+            flags_dict,
+            semantic_metrics_sampling_enabled,
+        )
+
+        if not semantic_metrics_sampling_enabled():
+            return {
+                "status": "success",
+                "message": (
+                    "Semantic metrics skipped: both HASHIRU_ENABLE_SEMANTIC_ENTROPY and "
+                    "HASHIRU_ENABLE_SEMANTIC_DENSITY are off."
+                ),
+                "output": {
+                    "semantic_entropy": None,
+                    "semantic_density": None,
+                    "raw_entropy": None,
+                    "raw_density": None,
+                    "semantic_ablation": flags_dict(),
+                    "skipped": True,
+                    "diagnostics": {},
+                },
+            }
+
         try:
+            seq_for_gateway = None
             # Convert samples into a list (if provided)
             if samples:
                 samples_list = [s.strip() for s in samples.split(",") if s.strip()]
@@ -80,9 +109,14 @@ class SemanticMetricsTool:
                 try:
                     from src.manager.agent_manager import AgentManager
                     _num_extra = 4  # paper recommends 4+ samples for meaningful entropy/density
-                    extra = AgentManager().get_agent_responses(agent_name, prompt, _num_extra)
+                    extra, extra_lps = AgentManager().get_agent_responses(
+                        agent_name, prompt, _num_extra
+                    )
                     if extra:
                         samples_list = extra
+                        if any(x is not None for x in extra_lps):
+                            # Primary `response` was supplied by the caller (no LP); samples align with extras.
+                            seq_for_gateway = [None] + list(extra_lps)
                         print(f"\n[SemanticMetricsTool] Auto-gathered {len(samples_list)} sample(s) from agent '{agent_name}'.\n")
                 except Exception as e:
                     print(f"\n[SemanticMetricsTool] Could not gather samples from agent '{agent_name}': {e}\n")
@@ -92,15 +126,17 @@ class SemanticMetricsTool:
             both = self.compute_semantic_metrics_both(
                 prompt=prompt,
                 response=response,
-                samples=samples_list
+                samples=samples_list,
+                sequence_logprobs=seq_for_gateway,
             )
-            entropy_val = both.get("entropy", None)
-            density_val = both.get("density", None)
+            raw_e = both.get("entropy", None)
+            raw_d = both.get("density", None)
+            entropy_val, density_val = apply_ablation_to_metrics(raw_e, raw_d)
             diag = both.get("diagnostics") or {}
             diag_e = diag
             diag_d = diag
             # Log raw gateway response for debugging (entropy/density 0.0 and 0.5 often mean timeout or backend error)
-            print(f"\n[SemanticMetricsTool] Gateway response: entropy={entropy_val}, density={density_val}, elapsed_s={diag.get('elapsed_s')}, entropy_ok={diag.get('entropy_ok')}, density_ok={diag.get('density_ok')}\n")
+            print(f"\n[SemanticMetricsTool] Gateway response: raw_entropy={raw_e}, raw_density={raw_d}; after_ablation entropy={entropy_val}, density={density_val}, elapsed_s={diag.get('elapsed_s')}, entropy_ok={diag.get('entropy_ok')}, density_ok={diag.get('density_ok')}\n")
             if diag.get("entropy_error") or diag.get("density_error"):
                 print(f"\n[SemanticMetricsTool] Backend errors: entropy_error={diag.get('entropy_error')}, density_error={diag.get('density_error')}\n")
 
@@ -122,8 +158,10 @@ class SemanticMetricsTool:
                 "output": {
                     "semantic_entropy": entropy_val,
                     "semantic_density": density_val,
-                    "raw_entropy": both.get("entropy"),
-                    "raw_density": both.get("density"),
+                    "raw_entropy": raw_e,
+                    "raw_density": raw_d,
+                    "semantic_ablation": flags_dict(),
+                    "skipped": False,
                     "diagnostics": {
                         "entropy_ok": diag.get("entropy_ok", True),
                         "density_ok": diag.get("density_ok", True),

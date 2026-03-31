@@ -215,6 +215,12 @@ with gr.Blocks(title="HASHIRU AI", css=css, fill_width=True, fill_height=True) a
     _default_modes = [m for m in Mode if m not in (Mode.ENABLE_RESOURCE_BUDGET, Mode.ENABLE_ECONOMY_BUDGET)]
     model_manager = GeminiManager(
         gemini_model="gemini-2.0-flash", modes=_default_modes)
+    try:
+        from src.manager.orchestration_trace import init_orchestration_trace_session
+
+        init_orchestration_trace_session()
+    except Exception:
+        pass
 
     def update_model(modeIndexes: List[int]):
         modes = [Mode(i+1) for i in modeIndexes]

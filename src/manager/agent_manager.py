@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Type, Any, Optional, Tuple, List
+from typing import Dict, Type, Any, Optional, Tuple, List, Union
 import os
 import json
 import ollama
@@ -20,16 +20,78 @@ import time
 from src.manager.tool_manager import ToolManager  # if ToolManager is importable here
 # OR direct import of metrics wrapper:
 from src.metrics.semantic_metrics import compute_semantic_metrics_both
+from src.manager.worker_model_policy import assert_base_model_allowed, is_base_model_allowed
+from src.manager.orchestration_trace import log_orchestration_event
+from src.manager.semantic_ablation import (
+    SEMANTIC_DENSITY_THRESHOLD,
+    SEMANTIC_ENTROPY_THRESHOLD,
+    apply_ablation_to_metrics,
+    ceo_semantic_quality_followup,
+    flags_dict,
+    reprompt_triggered,
+    semantic_metrics_sampling_enabled,
+)
 
 MODEL_PATH = "./src/models/"
 MODEL_FILE_PATH = "./src/models/models.json"
 
-SEMANTIC_ENTROPY_THRESHOLD = 1.0  # high value -> uncertain, will need to tune this!!
-SEMANTIC_DENSITY_THRESHOLD = 0.3  # low value -> low confidence, will need to tune this!!
+# Extra stochastic completions per worker turn (same prompt) so entropy/density have multiple hypotheses.
+NUM_EXTRA_RESPONSES_FOR_SEMANTIC = 4  # paper-style: 4+ samples; failures use `continue` so others still run.
 
-# Number of extra agent responses to gather for the same prompt so semantic entropy/density get multiple samples.
-# Extra responses for semantic metrics: 0 = only gather when compute_semantic_metrics tool is used (saves budget)
-NUM_EXTRA_RESPONSES_FOR_SEMANTIC = 4  # paper recommends multiple samples (e.g. 4) for entropy/density
+
+def semantic_sample_temperature() -> Optional[float]:
+    """
+    Sampling temperature for *extra* completions used only for semantic entropy/density.
+    Primary worker answers keep the model default so benchmarks stay stable.
+    Set HASHIRU_SEMANTIC_SAMPLE_TEMPERATURE empty or \"default\" to omit (Ollama default).
+    """
+    raw = os.getenv("HASHIRU_SEMANTIC_SAMPLE_TEMPERATURE", "0.85").strip()
+    if not raw or raw.lower() in ("default", "none", "off"):
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return 0.85
+
+
+def _coerce_agent_reply(result: Any) -> tuple[str, Optional[float]]:
+    """
+    Normalize agent ask_agent return: plain str or dict with text/content + optional sequence_logprob.
+    sequence_logprob: sum of chosen-token logprobs (natural log) when returned by Ollama logprob path.
+    """
+    if isinstance(result, dict):
+        text = result.get("text")
+        if text is None:
+            text = result.get("content", "")
+        text = (text or "").strip()
+        sl = result.get("sequence_logprob")
+        try:
+            seq_f = float(sl) if sl is not None else None
+        except (TypeError, ValueError):
+            seq_f = None
+        return text, seq_f
+    return str(result or "").strip(), None
+
+
+def compact_worker_reply_for_ceo(result: Any) -> Any:
+    """
+    Strip per-token logprobs from worker replies before they go to the CEO / tool JSON.
+    Full structures are huge and blow Gemini context (and Gradio tool preview).
+    """
+    if not isinstance(result, dict):
+        return result
+    if "token_logprobs" not in result and "token_logprob_steps" not in result:
+        return result
+    compact: dict[str, Any] = {}
+    if result.get("text") is not None:
+        compact["text"] = result["text"]
+    elif result.get("content") is not None:
+        compact["text"] = result["content"]
+    if result.get("sequence_logprob") is not None:
+        compact["sequence_logprob"] = result["sequence_logprob"]
+    if result.get("token_logprob_steps") is not None:
+        compact["token_logprob_steps"] = result["token_logprob_steps"]
+    return compact
 
 
 class Agent(ABC):
@@ -58,8 +120,8 @@ class Agent(ABC):
         pass
 
     @abstractmethod
-    def ask_agent(self, prompt: str) -> str:
-        """ask agent a question"""
+    def ask_agent(self, prompt: str, **kwargs) -> Any:
+        """ask agent a question (optional kwargs e.g. temperature for local models)"""
         pass
 
     @abstractmethod
@@ -163,12 +225,49 @@ class OllamaAgent(Agent):
             stream=False
         )
 
-    def ask_agent(self, prompt):
+    def ask_agent(self, prompt, **kwargs) -> Union[str, dict]:
         output_assistant_response(f"Asked Agent {self.agent_name} a question")
-        agent_response = ollama.chat(
-            model=self.agent_name,
-            messages=[{"role": "user", "content": prompt}],
+        from src.manager.ollama_logprobs import (
+            ollama_chat_with_logprobs,
+            ollama_logprobs_feature_enabled,
         )
+
+        temperature = kwargs.get("temperature")
+
+        # Try Ollama logprobs for any local Ollama model. Not all models/builds expose it;
+        # failures are handled by the fallback chat path below.
+        if ollama_logprobs_feature_enabled():
+            try:
+                text, seq_lp, raw_lp, _data = ollama_chat_with_logprobs(
+                    model=self.agent_name,
+                    system_prompt=self.system_prompt,
+                    user_prompt=prompt,
+                    temperature=temperature,
+                )
+                output_assistant_response(
+                    f"Agent {self.agent_name} answered with {text}"
+                )
+                n_tok = len(raw_lp) if raw_lp else 0
+                return {
+                    "text": text,
+                    "sequence_logprob": seq_lp,
+                    "token_logprobs": raw_lp,
+                    "token_logprob_steps": n_tok,
+                }
+            except Exception as e:
+                logging.getLogger(__name__).warning(
+                    "Ollama logprob chat failed for %s, falling back to library chat: %s",
+                    self.agent_name,
+                    e,
+                )
+
+        chat_kwargs: dict[str, Any] = {
+            "model": self.agent_name,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if temperature is not None:
+            chat_kwargs["options"] = {"temperature": float(temperature)}
+        agent_response = ollama.chat(**chat_kwargs)
         output_assistant_response(
             f"Agent {self.agent_name} answered with {agent_response.message.content}")
         return agent_response.message.content
@@ -215,7 +314,7 @@ class GeminiAgent(Agent):
     def create_model(self):
         self.messages = []
 
-    def ask_agent(self, prompt):
+    def ask_agent(self, prompt, **kwargs):
         response = self.chat.send_message(
             message=prompt,
             config=types.GenerateContentConfig(
@@ -274,7 +373,7 @@ class GroqAgent(Agent):
         """
         pass
 
-    def ask_agent(self, prompt: str) -> str:
+    def ask_agent(self, prompt: str, **kwargs) -> str:
         """Ask agent a question"""
         if not self.client:
             raise ConnectionError("Groq client not initialized. Check API key and constructor.")
@@ -343,7 +442,7 @@ class LambdaAgent(Agent):
     def create_model(self) -> None:
         pass  # Lambda already deployed
 
-    def ask_agent(self, prompt: str) -> str:
+    def ask_agent(self, prompt: str, **kwargs) -> str:
         """Ask agent a question"""
         try:
             response = self.client.chat.completions.create(
@@ -364,6 +463,102 @@ class LambdaAgent(Agent):
     def get_type(self) -> str:
         return self.type
 
+class OpenAIAgent(Agent):
+    type = "cloud"
+
+    def __init__(
+        self,
+        agent_name: str,
+        base_model: str,
+        system_prompt: str,
+        create_resource_cost: int,
+        invoke_resource_cost: int,
+        create_expense_cost: int = 0,
+        invoke_expense_cost: int = 0,
+        output_expense_cost: int = 0,
+    ):
+        self.api_key = os.getenv("OPENAI_API_KEY")
+        if not self.api_key:
+            raise ValueError(
+                "OpenAI API key is required for ChatGPT models. "
+                "Set OPENAI_API_KEY environment variable."
+            )
+        self.client = OpenAI(api_key=self.api_key)
+        super().__init__(
+            agent_name,
+            base_model,
+            system_prompt,
+            create_resource_cost,
+            invoke_resource_cost,
+            create_expense_cost,
+            invoke_expense_cost,
+            output_expense_cost,
+        )
+
+    def create_model(self) -> None:
+        # OpenAI-hosted models do not require local creation.
+        pass
+
+    @staticmethod
+    def _sum_choice_logprobs(choice: Any) -> Optional[float]:
+        """
+        Sum chosen-token logprobs when the provider returns them.
+        Returns None when unavailable.
+        """
+        try:
+            lp_obj = getattr(choice, "logprobs", None)
+            content = getattr(lp_obj, "content", None)
+            if not content:
+                return None
+            total = 0.0
+            n = 0
+            for step in content:
+                lp = getattr(step, "logprob", None)
+                if lp is None:
+                    continue
+                total += float(lp)
+                n += 1
+            return total if n > 0 else None
+        except Exception:
+            return None
+
+    def ask_agent(self, prompt: str, **kwargs) -> Union[str, dict]:
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+        try:
+            response = self.client.chat.completions.create(
+                model=self.base_model,
+                messages=messages,
+                logprobs=True,
+            )
+            choice = response.choices[0]
+            text = (choice.message.content or "").strip()
+            seq_lp = self._sum_choice_logprobs(choice)
+            return {
+                "text": text,
+                "sequence_logprob": seq_lp,
+            }
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "OpenAI logprob chat failed for %s, falling back without logprobs: %s",
+                self.base_model,
+                e,
+            )
+
+        response = self.client.chat.completions.create(
+            model=self.base_model,
+            messages=messages,
+        )
+        return (response.choices[0].message.content or "").strip()
+
+    def delete_agent(self) -> None:
+        pass
+
+    def get_type(self) -> str:
+        return self.type
+
 @singleton
 class AgentManager():
     budget_manager: BudgetManager = BudgetManager()
@@ -373,6 +568,7 @@ class AgentManager():
 
     def __init__(self):
         self._agents: Dict[str, Agent] = {}
+        self._agent_histories: Dict[str, List[dict]] = {}
         self.logger = logging.getLogger("AgentManager")
         self._agent_types = {
             "ollama": OllamaAgent,
@@ -380,9 +576,13 @@ class AgentManager():
             # "gemini": GeminiAgent,
             "groq": GroqAgent,
             "lambda": LambdaAgent,
+            "openai": OpenAIAgent,
         }
 
         self._load_agents()
+
+    def get_agent_history(self, agent_name: str) -> List[dict]:
+        return list(self._agent_histories.get(agent_name, []))
 
     def set_creation_mode(self, status: bool):
         self.is_creation_enabled = status
@@ -418,6 +618,8 @@ class AgentManager():
 
         if agent_name in self._agents:
             raise ValueError(f"Agent {agent_name} already exists")
+
+        assert_base_model_allowed(base_model)
 
         # @@ NEW ADDITION, should throw an error if something is wrong
         if "gemini" in base_model and not os.environ.get("GOOGLE_API_KEY"):
@@ -508,33 +710,39 @@ class AgentManager():
             raise ValueError(f"Agent {agent_name} does not exists")
         return self._agents[agent_name]
 
-    def get_agent_responses(self, agent_name: str, prompt: str, num_responses: int) -> list:
+    def get_agent_responses(
+        self, agent_name: str, prompt: str, num_responses: int
+    ) -> Tuple[list, list]:
         """
         Get num_responses from the agent for the same prompt (for semantic metrics).
-        Returns a list of response strings. Does not compute metrics or append to history.
+        Returns (texts, sequence_logprobs): parallel lists (one float or None per text
+        when the backend returns sequence_logprob). Does not compute metrics or append to history.
         """
         agent = self.get_agent(agent_name)
         if not self.is_local_invocation_enabled and agent.get_type() == "local":
             raise ValueError("Local invocation mode is disabled.")
         if not self.is_cloud_invocation_enabled and agent.get_type() == "cloud":
             raise ValueError("Cloud invocation mode is disabled.")
-        texts = []
+        texts: list[str] = []
+        seq_lps: list[Optional[float]] = []
         n_tokens_prompt = len(prompt.split()) / 1000000
+        ss_temp = semantic_sample_temperature()
         for _ in range(num_responses):
             try:
                 self.validate_budget(agent.invoke_resource_cost,
                                      agent.invoke_expense_cost * n_tokens_prompt)
                 self.budget_manager.add_to_expense_budget(agent.invoke_expense_cost * n_tokens_prompt)
-                result = agent.ask_agent(prompt)
-                t = result.get("text") if isinstance(result, dict) else result
+                result = agent.ask_agent(prompt, temperature=ss_temp)
+                t, lp = _coerce_agent_reply(result)
                 if t and str(t).strip():
                     texts.append(str(t).strip())
+                    seq_lps.append(lp)
                 n_out = len((t or "").split()) / 1000000
                 self.budget_manager.add_to_expense_budget(agent.output_expense_cost * n_out)
             except Exception as e:
-                self.logger.debug("get_agent_responses: one call failed: %s", e)
-                break
-        return texts
+                self.logger.warning("get_agent_responses: one call failed (continuing): %s", e)
+                continue
+        return texts, seq_lps
 
     def list_agents(self) -> dict:
         """Return agent information (name, description, costs)"""
@@ -546,6 +754,9 @@ class AgentManager():
                 # Include description/specialty so CEO can judge overlap before creating new agents
                 simplified_agents = {}
                 for name, data in full_models.items():
+                    bm = data.get("base_model", "")
+                    if not is_base_model_allowed(bm):
+                        continue
                     desc = data.get("description", "")
                     simplified_agents[name] = {
                         "description": desc,
@@ -554,7 +765,7 @@ class AgentManager():
                         "invoke_resource_cost": data.get("invoke_resource_cost", 0),
                         "create_expense_cost": data.get("create_expense_cost", 0),
                         "invoke_expense_cost": data.get("invoke_expense_cost", 0),
-                        "base_model": data.get("base_model", ""),
+                        "base_model": bm,
                     }
                 return simplified_agents
             else:
@@ -584,7 +795,7 @@ class AgentManager():
         return (self.budget_manager.get_current_remaining_resource_budget(),
                 self.budget_manager.get_current_remaining_expense_budget())
 
-    def ask_agent(self, agent_name: str, prompt: str, **kwargs) -> Tuple[str, int]:
+    def ask_agent(self, agent_name: str, prompt: str, **kwargs):
         agent: Agent = self.get_agent(agent_name)
         print(agent.get_type())
         print(agent_name)
@@ -605,113 +816,155 @@ class AgentManager():
             agent.invoke_expense_cost*n_tokens)
 
         result = agent.ask_agent(prompt)
-        text = result.get("text") if isinstance(result, dict) else result
+        text, primary_seq_lp = _coerce_agent_reply(result)
         n_tokens = len((text or "").split()) / 1000000
         self.budget_manager.add_to_expense_budget(
             agent.output_expense_cost * n_tokens)
 
         # --- Gather extra responses for semantic metrics (same prompt, multiple samples) ---
-        samples_for_metrics = []
-        for _ in range(NUM_EXTRA_RESPONSES_FOR_SEMANTIC):
-            try:
-                self.validate_budget(agent.invoke_resource_cost,
-                                     agent.invoke_expense_cost * n_tokens)
-                self.budget_manager.add_to_expense_budget(
-                    agent.invoke_expense_cost * n_tokens)
-                extra_result = agent.ask_agent(prompt)
-                extra_text = extra_result.get("text") if isinstance(extra_result, dict) else extra_result
-                if extra_text and extra_text.strip():
-                    samples_for_metrics.append(extra_text.strip())
-                n_tokens_out = len((extra_text or "").split()) / 1000000
-                self.budget_manager.add_to_expense_budget(
-                    agent.output_expense_cost * n_tokens_out)
-            except Exception as e:
-                self.logger.debug("Extra response for semantic metrics failed (continuing with what we have): %s", e)
-                break
+        samples_for_metrics: list[str] = []
+        sample_seq_lps: list[Optional[float]] = []
+        ss_temp = semantic_sample_temperature()
+        if semantic_metrics_sampling_enabled():
+            for _ in range(NUM_EXTRA_RESPONSES_FOR_SEMANTIC):
+                try:
+                    self.validate_budget(agent.invoke_resource_cost,
+                                         agent.invoke_expense_cost * n_tokens)
+                    self.budget_manager.add_to_expense_budget(
+                        agent.invoke_expense_cost * n_tokens)
+                    extra_result = agent.ask_agent(prompt, temperature=ss_temp)
+                    extra_text, extra_lp = _coerce_agent_reply(extra_result)
+                    if extra_text and extra_text.strip():
+                        samples_for_metrics.append(extra_text.strip())
+                        sample_seq_lps.append(extra_lp)
+                    n_tokens_out = len((extra_text or "").split()) / 1000000
+                    self.budget_manager.add_to_expense_budget(
+                        agent.output_expense_cost * n_tokens_out)
+                except Exception as e:
+                    self.logger.warning(
+                        "Extra response for semantic metrics failed (will try remaining samples): %s", e
+                    )
+                    continue
 
-        # --- Compute semantic metrics only when we have multiple responses (samples); single gateway call for both ---
+        # --- Always one gateway call per worker turn when semantic metrics are enabled (may be 0 extra samples). ---
         entropy, density = None, None
-        if samples_for_metrics:
+        both_diag = None
+        sequence_logprobs: Optional[list] = None
+        if semantic_metrics_sampling_enabled():
+            if samples_for_metrics:
+                if primary_seq_lp is not None or any(
+                    x is not None for x in sample_seq_lps
+                ):
+                    sequence_logprobs = [primary_seq_lp] + sample_seq_lps
+            elif primary_seq_lp is not None:
+                sequence_logprobs = [primary_seq_lp]
             try:
                 both = compute_semantic_metrics_both(
-                    prompt=prompt, response=text, samples=samples_for_metrics
+                    prompt=prompt,
+                    response=text,
+                    samples=samples_for_metrics if samples_for_metrics else None,
+                    sequence_logprobs=sequence_logprobs,
                 )
-                entropy = both.get("entropy")
-                density = both.get("density")
+                entropy, density = apply_ablation_to_metrics(
+                    both.get("entropy"), both.get("density")
+                )
+                both_diag = both.get("diagnostics")
                 if not both.get("diagnostics", {}).get("entropy_ok"):
                     self.logger.debug("Entropy backend reported error: %s", both.get("diagnostics", {}).get("entropy_error"))
                 if not both.get("diagnostics", {}).get("density_ok"):
                     self.logger.debug("Density backend reported error: %s", both.get("diagnostics", {}).get("density_error"))
             except Exception as e:
                 self.logger.warning("Semantic metric compute failed for agent %s: %s", agent_name, e)
+            self.logger.info(
+                "Semantic metrics (%s): samples_collected=%s entropy=%s density=%s entropy_ok=%s density_ok=%s",
+                agent_name,
+                len(samples_for_metrics),
+                entropy,
+                density,
+                (both_diag or {}).get("entropy_ok"),
+                (both_diag or {}).get("density_ok"),
+            )
 
-        # store metrics in agent history for later aggregate scoring
-        # @@ source of error, function does not exist for all type of agents, FIX THAT
-        # agent.append_to_history({
-        #     "role": "agent",
-        #     "text": text,
-        #     "semantic_entropy": entropy,
-        #     "semantic_density": density,
-        #     "timestamp": time.time()
-        # })
+        prompt_excerpt = prompt
+        if isinstance(prompt, str) and len(prompt) > 500:
+            prompt_excerpt = prompt[:500] + "..."
 
-        # @@ NEW ATTEMPT, should log issues instead of crash if the history function does not work
-        # After receiving text from agent
         entry = {
             "role": "agent",
             "text": text,
             "semantic_entropy": entropy,
             "semantic_density": density,
-            "timestamp": time.time()
+            "semantic_quality_concern": reprompt_triggered(entropy, density),
+            "timestamp": time.time(),
+            "prompt_excerpt": prompt_excerpt,
         }
-        # Defensive call; prefer agent.append_to_history if available
         try:
             append_fn = getattr(agent, "append_to_history", None)
             if callable(append_fn):
                 append_fn(entry)
             else:
-                # fallback: record in AgentManager-level history map if needed
                 try:
                     self._agent_histories.setdefault(agent_name, []).append(entry)
                 except Exception:
-                    # As last resort, log and continue
                     self.logger.warning("Could not append agent history for %s", getattr(agent, "name", agent_name))
         except Exception as e:
             self.logger.exception("append_to_history invocation failed: %s", e)
 
-        # --- Decision rules: reprompt / escalate ---
-        # Example rule: if entropy is high OR density is low, attempt a reprompt
-        reprompted = False
-        if entropy is not None and density is not None:
-            if (entropy > SEMANTIC_ENTROPY_THRESHOLD) or (density < SEMANTIC_DENSITY_THRESHOLD):
-                # Prepare a reprompt template. You can make this more sophisticated.
-                reprompt_msg = ("Your previous response seems uncertain/conflicting (semantic_entropy={:.3f}, semantic_density={:.3f}). "
-                                "Please try again, prioritize factual grounding and be explicit about uncertainty. "
-                                "If you can't be confident, say 'I don't know'.\n\nOriginal task: {}\n").format(entropy, density, prompt)
-                # Try one reprompt (avoid infinite loop): may pass `reprompt_count` in kwargs to limit
-                reprompt_count = kwargs.get("reprompt_count", 0)
-                if reprompt_count < 1:
-                    reprompted = True
-                    new_result = agent.ask_agent(prompt + "\n\n" + reprompt_msg)
-                    # re-evaluate metrics for the new result (optionally)
-                    # ... compute metrics again and store
-                    result = new_result
+        ceo_followup = ceo_semantic_quality_followup(
+            agent_name=agent_name,
+            worker_prompt=prompt,
+            entropy=entropy,
+            density=density,
+        )
+        meta = {
+            "agent_name": agent_name,
+            "base_model": getattr(agent, "base_model", None),
+            "worker_prompt": prompt,
+            "semantic_entropy": entropy,
+            "semantic_density": density,
+            "semantic_entropy_threshold": SEMANTIC_ENTROPY_THRESHOLD,
+            "semantic_density_threshold": SEMANTIC_DENSITY_THRESHOLD,
+            "num_stochastic_samples_first_round": len(samples_for_metrics),
+            "metrics_diagnostics_final": both_diag,
+            "semantic_ablation": flags_dict(),
+            "sequence_logprobs": sequence_logprobs,
+            "semantic_quality_concern": ceo_followup["semantic_quality_concern"],
+            "semantic_threshold_violations": ceo_followup["semantic_threshold_violations"],
+            "semantic_quality_summary": ceo_followup["semantic_quality_summary"],
+            "suggested_ceo_next_steps": ceo_followup["suggested_ceo_next_steps"],
+            "worker_prompt_excerpt_for_ceo": ceo_followup["worker_prompt_excerpt_for_ceo"],
+            "worker_reprompted_after_semantic_check": False,
+        }
+        log_orchestration_event(
+            "worker_answer",
+            agent_name=agent_name,
+            base_model=meta["base_model"],
+            worker_prompt=prompt,
+            semantic_entropy=entropy,
+            semantic_density=density,
+            worker_reprompted_after_semantic_check=False,
+            semantic_quality_concern=meta["semantic_quality_concern"],
+        )
 
-        return (result,
-                self.budget_manager.get_current_remaining_resource_budget(),
-                self.budget_manager.get_current_remaining_expense_budget())
+        return (
+            result,
+            self.budget_manager.get_current_remaining_resource_budget(),
+            self.budget_manager.get_current_remaining_expense_budget(),
+            meta,
+        )
 
     def ask_multiple_agents(
         self,
         agent_prompts: list,
         user_question: str = "",
+        metric_scope: str = "per_agent",
         **kwargs
     ) -> Tuple[dict, Optional[float], Optional[float], int, int]:
         """
-        Ask multiple agents (each with its own prompt), then compute semantic metrics
-        over ALL responses from ALL agents. Use this when the CEO delegates one question
-        to several agents (e.g. medical + robotics); entropy/density reflect agreement
-        across the full set of answers.
+        Ask multiple agents (each with its own prompt), then compute semantic metrics.
+        Default behavior is per-agent metrics only (metric_scope="per_agent"), which is
+        safer for heterogeneous sub-tasks. Optional metric_scope="global" computes one
+        aggregate metric over all responses for same-question, multi-viewpoint scenarios.
 
         agent_prompts: list of dicts with keys "agent_name" and "prompt"
         user_question: overall question (used for metrics); if empty, first prompt is used.
@@ -721,8 +974,12 @@ class AgentManager():
         """
         if not agent_prompts:
             raise ValueError("agent_prompts must be a non-empty list of {agent_name, prompt}")
+        metric_scope = (metric_scope or "per_agent").strip().lower()
+        if metric_scope not in ("per_agent", "global"):
+            raise ValueError("metric_scope must be one of: per_agent, global")
         primaries = []
         all_individual_responses = []
+        all_seq_lps: list[Optional[float]] = []
         per_agent_outputs = []
 
         for item in agent_prompts:
@@ -739,17 +996,69 @@ class AgentManager():
             self.validate_budget(agent.invoke_resource_cost, agent.invoke_expense_cost * n_tokens)
             self.budget_manager.add_to_expense_budget(agent.invoke_expense_cost * n_tokens)
             result = agent.ask_agent(prompt)
-            text = result.get("text") if isinstance(result, dict) else result
+            text, primary_lp = _coerce_agent_reply(result)
             text = (text or "").strip()
             n_out = len((text or "").split()) / 1000000
             self.budget_manager.add_to_expense_budget(agent.output_expense_cost * n_out)
             primaries.append((name, text))
             all_individual_responses.append(text)
-            per_agent_outputs.append({"agent_name": name, "prompt": prompt, "response": text})
+            all_seq_lps.append(primary_lp)
 
-            # Extra samples from this agent for semantic metrics (same agent, same prompt)
-            extra = self.get_agent_responses(name, prompt, NUM_EXTRA_RESPONSES_FOR_SEMANTIC)
-            all_individual_responses.extend(extra)
+            extra: list[str] = []
+            extra_lps: list[Optional[float]] = []
+            if semantic_metrics_sampling_enabled():
+                extra, extra_lps = self.get_agent_responses(
+                    name, prompt, NUM_EXTRA_RESPONSES_FOR_SEMANTIC
+                )
+                all_individual_responses.extend(extra)
+                all_seq_lps.extend(extra_lps)
+
+            pe, pd = None, None
+            pediag = None
+            seq_i: Optional[list] = None
+            if semantic_metrics_sampling_enabled() and text:
+                if primary_lp is not None or any(
+                    x is not None for x in extra_lps
+                ):
+                    seq_i = [primary_lp] + extra_lps
+                try:
+                    both_i = compute_semantic_metrics_both(
+                        prompt=prompt,
+                        response=text,
+                        samples=extra,
+                        sequence_logprobs=seq_i,
+                    )
+                    pe, pd = apply_ablation_to_metrics(
+                        both_i.get("entropy"), both_i.get("density")
+                    )
+                    pediag = both_i.get("diagnostics")
+                except Exception as e:
+                    self.logger.warning(
+                        "Per-agent semantic metrics failed for %s: %s", name, e
+                    )
+            per_agent_outputs.append(
+                {
+                    "agent_name": name,
+                    "prompt": prompt,
+                    "response": text,
+                    "base_model": getattr(agent, "base_model", None),
+                    "semantic_entropy": pe,
+                    "semantic_density": pd,
+                    "num_stochastic_samples": len(extra),
+                    "metrics_diagnostics": pediag,
+                    "semantic_ablation": flags_dict(),
+                    "sequence_logprobs": seq_i,
+                }
+            )
+            log_orchestration_event(
+                "worker_answer_multi",
+                agent_name=name,
+                base_model=getattr(agent, "base_model", None),
+                worker_prompt=prompt,
+                user_question=user_question or None,
+                semantic_entropy=pe,
+                semantic_density=pd,
+            )
 
         combined_response = "\n\n".join(
             f"**{name}:**\n{text}" for name, text in primaries
@@ -757,17 +1066,46 @@ class AgentManager():
         metrics_prompt = user_question.strip() or (agent_prompts[0].get("prompt", ""))
 
         entropy, density = None, None
-        if len(all_individual_responses) >= 1:
-            try:
-                both = compute_semantic_metrics_both(
-                    prompt=metrics_prompt,
-                    response=combined_response,
-                    samples=all_individual_responses,
-                )
-                entropy = both.get("entropy")
-                density = both.get("density")
-            except Exception as e:
-                self.logger.warning("Semantic metric compute failed for multi-agent: %s", e)
+        seq_combined: Optional[list] = None
+
+        if metric_scope == "global":
+            # Primary `combined_response` is not a single model run — no sequence LP;
+            # align [None] + per-utterance LPs with samples.
+            if semantic_metrics_sampling_enabled() and any(
+                x is not None for x in all_seq_lps
+            ):
+                seq_combined = [None] + list(all_seq_lps)
+            if (
+                semantic_metrics_sampling_enabled()
+                and len(all_individual_responses) >= 1
+            ):
+                try:
+                    both = compute_semantic_metrics_both(
+                        prompt=metrics_prompt,
+                        response=combined_response,
+                        samples=all_individual_responses,
+                        sequence_logprobs=seq_combined,
+                    )
+                    entropy, density = apply_ablation_to_metrics(
+                        both.get("entropy"), both.get("density")
+                    )
+                except Exception as e:
+                    self.logger.warning("Semantic metric compute failed for multi-agent: %s", e)
+        else:
+            # Default: summarize per-agent metrics to avoid false concern on heterogeneous
+            # sub-tasks that naturally produce diverse outputs.
+            pe_vals = [
+                row.get("semantic_entropy")
+                for row in per_agent_outputs
+                if row.get("semantic_entropy") is not None
+            ]
+            pd_vals = [
+                row.get("semantic_density")
+                for row in per_agent_outputs
+                if row.get("semantic_density") is not None
+            ]
+            entropy = (sum(pe_vals) / len(pe_vals)) if pe_vals else None
+            density = (sum(pd_vals) / len(pd_vals)) if pd_vals else None
 
         result_dict = {
             "text": combined_response,
@@ -775,7 +1113,18 @@ class AgentManager():
             "per_agent_outputs": per_agent_outputs,
             "semantic_entropy": entropy,
             "semantic_density": density,
+            "semantic_metric_scope": metric_scope,
+            "semantic_ablation": flags_dict(),
+            "sequence_logprobs": seq_combined,
         }
+        log_orchestration_event(
+            "worker_answers_multi_combined",
+            n_agents=len(per_agent_outputs),
+            user_question=metrics_prompt,
+            semantic_metric_scope=metric_scope,
+            semantic_entropy=entropy,
+            semantic_density=density,
+        )
         return (
             result_dict,
             entropy,
@@ -861,17 +1210,20 @@ class AgentManager():
             output_assistant_response(f"Error saving agent {agent_name}: {e}")
 
     def _get_agent_type(self, base_model) -> str:
-        if base_model == "llama3.2":
+        model_key = (base_model or "").strip().lower()
+        if model_key == "llama3.2":
             return "ollama"
-        elif base_model == "mistral":
+        elif model_key == "mistral":
             return "ollama"
-        elif base_model == "deepseek-r1":
+        elif model_key == "deepseek-r1":
             return "ollama"
-        elif "gemini" in base_model:
+        elif model_key in {"chatgpt-5.4", "gpt-5.4"} or "chatgpt" in model_key:
+            return "openai"
+        elif "gemini" in model_key:
             return "gemini"
-        elif "groq" in base_model:
+        elif "groq" in model_key:
             return "groq"
-        elif base_model.startswith("lambda-"):
+        elif model_key.startswith("lambda-"):
             return "lambda"
         else:
             return "unknown"
@@ -890,6 +1242,13 @@ class AgentManager():
                 if name in self._agents:
                     continue
                 base_model = data["base_model"]
+                if not is_base_model_allowed(base_model):
+                    self.logger.info(
+                        "Skipping persisted agent %r: base_model %r not allowed by worker model policy",
+                        name,
+                        base_model,
+                    )
+                    continue
                 system_prompt = data["system_prompt"]
                 create_resource_cost = data.get("create_resource_cost", 0)
                 invoke_resource_cost = data.get("invoke_resource_cost", 0)

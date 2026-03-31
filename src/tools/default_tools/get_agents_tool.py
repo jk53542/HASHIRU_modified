@@ -1,4 +1,5 @@
 from src.manager.agent_manager import AgentManager
+from src.manager.worker_model_policy import policy_summary
 
 __all__ = ['GetAgents']
 
@@ -29,4 +30,5 @@ class GetAgents():
             "status": "success",
             "message": "Agents list retrieved successfully",
             "agents": agents,
+            "worker_model_policy": policy_summary(),
         }
