@@ -19,13 +19,44 @@ include ``trace_file`` (basename) in directory mode.
 
 When a user message starts with ``[HASHIRU_TRACE_CTX]{json}\\n`` (see benchmarks using
 ``benchmark_trace_context.hashiru_trace_context_prefix``), the server strips that line and attaches
-``benchmark_name``, ``question_index``, ``question_id``, and ``bench_attempt`` to every trace row
-for that CEO turn.
+``benchmark_name``, ``question_index``, ``question_id``, ``bench_attempt``, and optional
+``question_text`` to every trace row for that CEO turn. The visible user message (after stripping
+the prefix) is also stored as ``user_turn_excerpt`` so downstream tools can align traces to
+benchmark rows even when worker prompts paraphrase the question.
+
+Turn metadata is stored both in a ``ContextVar`` and a thread-local fallback so tool logging
+still sees the same turn if the runtime moves work across contexts.
 
 ``worker_reprompted_after_semantic_check`` is True on a worker completion when an earlier completion
 for the **same agent name** in the same user turn had ``semantic_quality_concern`` true (CEO chose
 to ask again after thresholds fired). ``worker_invocation_index`` counts that agent's completions in
-the turn (1-based).
+the turn (1-based). That distinguishes **semantic reprompts** (same routing, new ``worker_prompt``)
+from **AskMultipleAgents** (``worker_answer_multi`` / ``worker_routing: AskMultipleAgents``).
+
+**Worker round cap:** each completed ``AskAgent`` or ``AskMultipleAgents`` tool call counts as one
+worker tool round for the current user message. After ``1 + HASHIRU_MAX_CEO_WORKER_REPROMPTS``
+rounds (default 5 reprompts → 6 rounds), further worker tools return a cap message and a heuristic
+best prior output instead of invoking models. See ``src/manager/ceo_worker_round_policy.py``.
+
+Each ``worker_answer`` / ``worker_answer_multi`` includes ``worker_response`` (the **primary**
+completion only—the one returned to the CEO for that tool call). Entropy/density may use
+additional **same-prompt** stochastic completions; those are **not** logged as separate trace rows.
+The text the CEO sees for that ``AskAgent`` call is **always** the first completion (index **0**):
+``same_prompt_completion_index_sent_to_ceo`` is always ``0`` and ``worker_response`` matches the
+tool output. ``same_prompt_total_llm_completions`` is ``1 + semantic_auxiliary_completions_count``.
+See also ``worker_response_kind`` (``primary``) and ``semantic_metrics_include_auxiliary_samples``.
+Benchmark turns should set ``question_text`` via ``[HASHIRU_TRACE_CTX]`` so every line also carries
+the original benchmark question.
+
+Each line also carries ``semantic_entropy`` / ``semantic_density``, threshold fields, and
+``implied_ceo_decision_hint`` summarizing whether the CEO *should* re-evaluate or may proceed.
+
+On ``ceo_tool_finished`` for worker tools: ``worker_routing`` is ``AskAgent`` (one worker per tool
+call) or ``AskMultipleAgents`` (several workers in one tool call). ``worker_subcalls_this_tool`` is
+the number of worker completions in that tool call (1 for AskAgent; for AskMultipleAgents, the
+length of ``subcall_agent_names``, which lists one name per subcall and may repeat the same agent).
+``called_agent_names`` remains de-duplicated for quick scanning. ``worker_response`` is duplicated
+on ``ceo_tool_finished`` for ``AskAgent`` when available.
 
 Call ``init_orchestration_trace_session()`` once at app startup (optional but recommended) to emit
 ``trace_session_start`` and create the per-session file immediately.
@@ -41,14 +72,26 @@ from contextvars import ContextVar
 from datetime import datetime
 from typing import Any
 
+from src.manager.ceo_worker_round_policy import (
+    max_ceo_worker_reprompts_per_user_turn,
+    max_ceo_worker_tool_rounds_per_user_turn,
+)
+
 # Per user-message turn: benchmark labels + per-agent semantic-concern history (for reprompt detection).
 _orch_turn: ContextVar[dict[str, Any] | None] = ContextVar("hashiru_orch_turn", default=None)
+# Mirror turn dict when ContextVar is empty in this thread (e.g. some Gradio/async boundaries).
+_orch_turn_tls = threading.local()
 
 _TRACE_CTX_PREFIX = "[HASHIRU_TRACE_CTX]"
 _ALLOWED_TRACE_CTX_KEYS = frozenset(
-    {"benchmark_name", "question_index", "question_id", "bench_attempt"}
+    {
+        "benchmark_name",
+        "question_index",
+        "question_id",
+        "bench_attempt",
+        "question_text",
+    }
 )
-
 _logger = logging.getLogger(__name__)
 
 _session_lock = threading.Lock()
@@ -163,21 +206,46 @@ def _default_turn_state() -> dict[str, Any]:
         "question_index": None,
         "question_id": None,
         "bench_attempt": None,
+        "question_text": None,
+        "user_turn_excerpt": None,
         "concern_by_agent": {},
+        # AskAgent + AskMultipleAgents completions this user turn (see ceo_worker_round_policy).
+        "ceo_worker_tool_rounds_completed": 0,
+        "ceo_worker_round_history": [],
     }
 
 
-def begin_orchestration_user_turn(meta: dict[str, Any] | None = None) -> None:
+def _get_turn_state() -> dict[str, Any] | None:
+    st = _orch_turn.get()
+    if st is not None:
+        return st
+    return getattr(_orch_turn_tls, "turn", None)
+
+
+def begin_orchestration_user_turn(
+    meta: dict[str, Any] | None = None,
+    *,
+    user_turn_excerpt: str | None = None,
+) -> None:
     """
     Reset orchestration state for one CEO user turn (one Gradio user message).
     Optionally set benchmark_* fields copied into every trace line until the next turn.
+    Pass ``user_turn_excerpt`` with the CEO-visible user text (prefix already stripped).
     """
     st = _default_turn_state()
     if meta:
         for k in _ALLOWED_TRACE_CTX_KEYS:
             if k in meta and meta[k] is not None:
                 st[k] = meta[k]
+    if st.get("question_index") is not None:
+        try:
+            st["question_index"] = int(st["question_index"])
+        except (TypeError, ValueError):
+            pass
+    if user_turn_excerpt:
+        st["user_turn_excerpt"] = user_turn_excerpt.strip()[:8000]
     _orch_turn.set(st)
+    _orch_turn_tls.turn = st
 
 
 def parse_trace_context_from_user_text(text: str) -> tuple[str, dict[str, Any] | None]:
@@ -202,12 +270,15 @@ def parse_trace_context_from_user_text(text: str) -> tuple[str, dict[str, Any] |
     if not isinstance(obj, dict):
         return text, None
     meta = {k: obj[k] for k in _ALLOWED_TRACE_CTX_KEYS if k in obj}
+    qt = meta.get("question_text")
+    if isinstance(qt, str) and len(qt) > 2500:
+        meta["question_text"] = qt[:2500]
     clean = remainder.lstrip("\n")
     return clean, meta
 
 
 def _turn_context_trace_fields() -> dict[str, Any]:
-    st = _orch_turn.get()
+    st = _get_turn_state()
     if not st:
         return {}
     out: dict[str, Any] = {}
@@ -215,6 +286,9 @@ def _turn_context_trace_fields() -> dict[str, Any]:
         v = st.get(k)
         if v is not None:
             out[k] = v
+    ex = st.get("user_turn_excerpt")
+    if ex:
+        out["user_turn_excerpt"] = ex
     return out
 
 
@@ -228,7 +302,7 @@ def worker_invocation_reprompt_flags(
     The reprompt flag is True when a prior completion for this agent in the same turn
     had semantic_quality_concern True (CEO likely re-asked after thresholds fired).
     """
-    st = _orch_turn.get()
+    st = _get_turn_state()
     if not st:
         return 1, False
     name = (agent_name or "").strip() or "_unknown"
@@ -240,14 +314,242 @@ def worker_invocation_reprompt_flags(
     return invocation_index, reprompted
 
 
-def _truncate(val: Any, limit: int = 4000) -> Any:
+def _ceo_worker_rounds_completed(st: dict[str, Any]) -> int:
+    try:
+        return int(st.get("ceo_worker_tool_rounds_completed") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def ceo_worker_tool_round_cap_reached() -> bool:
+    """
+    True when the current user turn has already used the allowed number of
+    AskAgent / AskMultipleAgents tool rounds (initial + reprompts).
+    """
+    st = _get_turn_state()
+    if not st:
+        return False
+    return _ceo_worker_rounds_completed(st) >= max_ceo_worker_tool_rounds_per_user_turn()
+
+
+def record_ceo_worker_tool_round(summary: dict[str, Any]) -> None:
+    """Append one completed worker delegation round for cap tracking and best-of selection."""
+    st = _get_turn_state()
+    if not st:
+        return
+    st["ceo_worker_tool_rounds_completed"] = _ceo_worker_rounds_completed(st) + 1
+    st.setdefault("ceo_worker_round_history", []).append(summary)
+
+
+def _score_round_for_best(s: dict[str, Any]) -> tuple[float, float, float]:
+    """
+    Lower is better: prefer no semantic concern, higher density, lower entropy.
+    Non-finite metrics sort last.
+    """
+    concern = 1.0 if s.get("semantic_quality_concern") else 0.0
+    dens = s.get("semantic_density")
+    ent = s.get("semantic_entropy")
+    try:
+        d = float(dens)
+        if d != d:  # NaN
+            d = -1.0
+    except (TypeError, ValueError):
+        d = -1.0
+    try:
+        e = float(ent)
+        if e != e:
+            e = 1e100
+    except (TypeError, ValueError):
+        e = 1e100
+    return (concern, -d, e)
+
+
+def select_best_prior_worker_round(history: list[Any]) -> dict[str, Any] | None:
+    """Pick a single prior round using a small semantic-metrics heuristic."""
+    rounds = [x for x in history if isinstance(x, dict)]
+    if not rounds:
+        return None
+    return min(rounds, key=_score_round_for_best)
+
+
+def _digest_worker_round_history(history: list[Any], preview_len: int = 400) -> list[dict[str, Any]]:
+    """Short summaries for tool JSON (full text already appears in prior chat tool results)."""
+    out: list[dict[str, Any]] = []
+    for i, h in enumerate(history):
+        if not isinstance(h, dict):
+            continue
+        blob = (
+            (h.get("primary_output_excerpt") or "")
+            or (h.get("worker_response") or "")
+            or (h.get("combined_output") or "")
+        )
+        blob = str(blob)
+        prev = blob[:preview_len] + ("…" if len(blob) > preview_len else "")
+        one: dict[str, Any] = {
+            "round_index": i + 1,
+            "tool": h.get("tool"),
+            "semantic_quality_concern": h.get("semantic_quality_concern"),
+            "semantic_density": h.get("semantic_density"),
+            "semantic_entropy": h.get("semantic_entropy"),
+            "output_preview": prev,
+        }
+        if h.get("tool") == "AskAgent":
+            one["agent_name"] = h.get("agent_name")
+        elif h.get("tool") == "AskMultipleAgents":
+            names = []
+            for row in h.get("per_agent_outputs_brief") or []:
+                if isinstance(row, dict) and row.get("agent_name"):
+                    names.append(row["agent_name"])
+            if names:
+                one["agent_names"] = names
+        out.append(one)
+    return out
+
+
+def _slim_round_for_ceo(h: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not h:
+        return None
+    keys = (
+        "tool",
+        "agent_name",
+        "user_question",
+        "semantic_quality_concern",
+        "semantic_entropy",
+        "semantic_density",
+        "semantic_metric_scope",
+        "primary_output_excerpt",
+        "worker_prompt",
+        "worker_response",
+        "combined_output",
+    )
+    slim = {k: h.get(k) for k in keys if k in h and h.get(k) is not None}
+    if h.get("tool") == "AskMultipleAgents" and h.get("per_agent_outputs_brief"):
+        slim["per_agent_outputs_brief"] = h.get("per_agent_outputs_brief")
+    return slim
+
+
+def ceo_worker_round_cap_tool_result(*, requested_tool: str) -> dict[str, Any]:
+    """
+    Tool return value when the CEO hits the per-turn worker delegation cap.
+    The CEO must not call AskAgent / AskMultipleAgents again for this user message.
+    """
+    st = _get_turn_state()
+    history: list = list((st or {}).get("ceo_worker_round_history") or [])
+    best = select_best_prior_worker_round(history)
+    best_slim = _slim_round_for_ceo(best)
+    cap = max_ceo_worker_tool_rounds_per_user_turn()
+    n_done = len(history)
+    max_rep = max_ceo_worker_reprompts_per_user_turn()
+
+    best_text = ""
+    if best:
+        best_text = (
+            (best.get("primary_output_excerpt") or "")
+            or (best.get("worker_response") or "")
+            or (best.get("combined_output") or "")
+        )
+
+    msg = (
+        f"Worker delegation cap reached for this user message: completed {n_done} worker tool "
+        f"round(s) (maximum {cap}, i.e. {max_rep} reprompt(s) after the first). "
+        f"Do NOT call AskAgent or AskMultipleAgents again for this turn. "
+        f"Produce your final answer to the user by synthesizing from prior worker output(s). "
+        f"The field heuristic_best_prior_round summarizes one reasonable choice; you may override "
+        f"with your own judgment."
+    )
+
+    orch_meta: dict[str, Any] = {
+        "agent_name": None,
+        "worker_prompt": f"(blocked: {requested_tool} — worker round cap reached)",
+        "worker_response": best_text,
+        "worker_response_kind": "primary",
+        "semantic_auxiliary_completions_count": 0,
+        "semantic_metrics_include_auxiliary_samples": False,
+        "same_prompt_completion_index_sent_to_ceo": 0,
+        "same_prompt_total_llm_completions": 1,
+        "semantic_entropy": (best or {}).get("semantic_entropy"),
+        "semantic_density": (best or {}).get("semantic_density"),
+        "semantic_entropy_threshold": None,
+        "semantic_density_threshold": None,
+        "semantic_quality_concern": False,
+        "worker_invocation_index": None,
+        "worker_reprompted_after_semantic_check": False,
+        "semantic_threshold_violations": [],
+        "semantic_quality_summary": "Worker round cap; no new worker call executed.",
+        "suggested_ceo_next_steps": [
+            "Synthesize the user-facing reply from prior worker outputs without further delegation.",
+        ],
+        "implied_ceo_decision_hint": "worker_round_cap_reached_finalize_from_prior_outputs",
+        "worker_round_cap_reached": True,
+    }
+
+    out: dict[str, Any] = {
+        "status": "success",
+        "message": msg,
+        "worker_round_cap_reached": True,
+        "worker_rounds_completed": n_done,
+        "max_worker_rounds_allowed": cap,
+        "max_reprompts_allowed": max_rep,
+        "prior_worker_rounds_digest": _digest_worker_round_history(history),
+        "heuristic_best_prior_round": best_slim,
+        "semantic_quality_concern": False,
+        "semantic_threshold_violations": [],
+        "semantic_quality_summary": orch_meta["semantic_quality_summary"],
+        "suggested_ceo_next_steps": orch_meta["suggested_ceo_next_steps"],
+        "worker_prompt_excerpt_for_ceo": orch_meta["worker_prompt"],
+        "orchestration_meta": orch_meta,
+    }
+
+    if requested_tool == "AskAgent":
+        out["output"] = best_text if best_text else None
+    else:
+        out["output"] = best_text if best_text else None
+        out["combined_output"] = (
+            (best or {}).get("combined_output") or best_text or ""
+        )
+        pa = (best or {}).get("per_agent_outputs_brief")
+        out["per_agent_outputs"] = pa if isinstance(pa, list) else []
+        out["semantic_entropy"] = (best or {}).get("semantic_entropy")
+        out["semantic_density"] = (best or {}).get("semantic_density")
+        out["semantic_metric_scope"] = (best or {}).get("semantic_metric_scope")
+
+    return out
+
+
+def _truncate(val: Any, limit: int = 4000, nested_str_limit: int = 4000) -> Any:
     if isinstance(val, str) and len(val) > limit:
         return val[:limit] + f"...<truncated {len(val) - limit} chars>"
     if isinstance(val, dict):
-        return {k: _truncate(v, limit=800) for k, v in list(val.items())[:80]}
+        return {
+            k: _truncate(v, limit=nested_str_limit, nested_str_limit=min(nested_str_limit, 8000))
+            for k, v in list(val.items())[:80]
+        }
     if isinstance(val, (list, tuple)) and len(val) > 64:
-        return [_truncate(x, limit=400) for x in val[:10]] + [f"...<{len(val)-10} more>"]
+        return [
+            _truncate(x, limit=min(limit, nested_str_limit), nested_str_limit=nested_str_limit)
+            for x in val[:10]
+        ] + [f"...<{len(val) - 10} more>"]
     return val
+
+
+def _truncate_per_agent_outputs(rows: Any, per_text_limit: int = 16000) -> Any:
+    """Keep multi-agent trace readable: cap each prompt/response string."""
+    if not isinstance(rows, list):
+        return _truncate(rows)
+    slim: list[dict[str, Any]] = []
+    for item in rows[:48]:
+        if not isinstance(item, dict):
+            continue
+        one: dict[str, Any] = {}
+        for k, v in item.items():
+            if k in ("response", "prompt", "worker_response") and isinstance(v, str):
+                one[k] = _truncate(v, limit=per_text_limit)
+            else:
+                one[k] = _truncate(v, limit=4000, nested_str_limit=4000)
+        slim.append(one)
+    if len(rows) > 48:
+        slim.append({"_note": f"...<{len(rows) - 48} more agents omitted>"})
+    return slim
 
 
 def log_orchestration_event(event: str, **fields: Any) -> None:
@@ -285,7 +587,12 @@ def log_orchestration_event(event: str, **fields: Any) -> None:
             rec["trace_file"] = _trace_basename
         rec.update(_turn_context_trace_fields())
         for k, v in fields.items():
-            rec[k] = _truncate(v)
+            if k == "worker_response" and isinstance(v, str):
+                rec[k] = _truncate(v, limit=50000)
+            elif k == "per_agent_outputs":
+                rec[k] = _truncate_per_agent_outputs(v)
+            else:
+                rec[k] = _truncate(v)
         line = json.dumps(rec, default=str, ensure_ascii=False) + "\n"
         try:
             with open(abs_path, "a", encoding="utf-8") as f:

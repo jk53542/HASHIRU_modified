@@ -919,15 +919,23 @@ class AgentManager():
             entropy=entropy,
             density=density,
         )
+        implied_hint = (
+            "semantic_metrics_below_bar_ceo_should_re_evaluate_or_reprompt"
+            if ceo_followup["semantic_quality_concern"]
+            else "semantic_metrics_acceptable_ceo_may_use_or_finalize"
+        )
+        n_aux = len(samples_for_metrics)
+        # CEO / AskAgent tool output always uses the first forward pass only; extras are metrics-only.
         meta = {
             "agent_name": agent_name,
             "base_model": getattr(agent, "base_model", None),
             "worker_prompt": prompt,
+            "worker_response": text,
             "semantic_entropy": entropy,
             "semantic_density": density,
             "semantic_entropy_threshold": SEMANTIC_ENTROPY_THRESHOLD,
             "semantic_density_threshold": SEMANTIC_DENSITY_THRESHOLD,
-            "num_stochastic_samples_first_round": len(samples_for_metrics),
+            "num_stochastic_samples_first_round": n_aux,
             "metrics_diagnostics_final": both_diag,
             "semantic_ablation": flags_dict(),
             "sequence_logprobs": sequence_logprobs,
@@ -936,6 +944,12 @@ class AgentManager():
             "semantic_quality_summary": ceo_followup["semantic_quality_summary"],
             "suggested_ceo_next_steps": ceo_followup["suggested_ceo_next_steps"],
             "worker_prompt_excerpt_for_ceo": ceo_followup["worker_prompt_excerpt_for_ceo"],
+            "implied_ceo_decision_hint": implied_hint,
+            "worker_response_kind": "primary",
+            "semantic_auxiliary_completions_count": n_aux,
+            "semantic_metrics_include_auxiliary_samples": bool(samples_for_metrics),
+            "same_prompt_completion_index_sent_to_ceo": 0,
+            "same_prompt_total_llm_completions": 1 + n_aux,
         }
         inv_idx, reprompted = worker_invocation_reprompt_flags(
             agent_name, bool(meta["semantic_quality_concern"])
@@ -944,14 +958,28 @@ class AgentManager():
         meta["worker_reprompted_after_semantic_check"] = reprompted
         log_orchestration_event(
             "worker_answer",
+            worker_routing="AskAgent",
+            phase="worker_completion",
             agent_name=agent_name,
             base_model=meta["base_model"],
             worker_prompt=prompt,
+            worker_response=text,
+            worker_response_kind="primary",
+            semantic_auxiliary_completions_count=n_aux,
+            semantic_metrics_include_auxiliary_samples=bool(samples_for_metrics),
+            same_prompt_completion_index_sent_to_ceo=0,
+            same_prompt_total_llm_completions=1 + n_aux,
             semantic_entropy=entropy,
             semantic_density=density,
+            semantic_entropy_threshold=SEMANTIC_ENTROPY_THRESHOLD,
+            semantic_density_threshold=SEMANTIC_DENSITY_THRESHOLD,
             worker_invocation_index=inv_idx,
             worker_reprompted_after_semantic_check=reprompted,
             semantic_quality_concern=meta["semantic_quality_concern"],
+            semantic_threshold_violations=meta["semantic_threshold_violations"],
+            semantic_quality_summary=meta["semantic_quality_summary"],
+            suggested_ceo_next_steps=meta["suggested_ceo_next_steps"],
+            implied_ceo_decision_hint=implied_hint,
         )
 
         return (
@@ -1046,15 +1074,21 @@ class AgentManager():
                     )
             concern_i = bool(reprompt_triggered(pe, pd))
             inv_m, rep_m = worker_invocation_reprompt_flags(name, concern_i)
+            n_aux_m = len(extra)
             per_agent_outputs.append(
                 {
                     "agent_name": name,
                     "prompt": prompt,
                     "response": text,
+                    "worker_response_kind": "primary",
+                    "semantic_auxiliary_completions_count": n_aux_m,
+                    "semantic_metrics_include_auxiliary_samples": bool(extra),
+                    "same_prompt_completion_index_sent_to_ceo": 0,
+                    "same_prompt_total_llm_completions": 1 + n_aux_m,
                     "base_model": getattr(agent, "base_model", None),
                     "semantic_entropy": pe,
                     "semantic_density": pd,
-                    "num_stochastic_samples": len(extra),
+                    "num_stochastic_samples": n_aux_m,
                     "metrics_diagnostics": pediag,
                     "semantic_ablation": flags_dict(),
                     "sequence_logprobs": seq_i,
@@ -1063,17 +1097,33 @@ class AgentManager():
                     "worker_reprompted_after_semantic_check": rep_m,
                 }
             )
+            multi_hint = (
+                "semantic_metrics_below_bar_ceo_should_re_evaluate_or_reprompt"
+                if concern_i
+                else "semantic_metrics_acceptable_ceo_may_use_or_finalize"
+            )
             log_orchestration_event(
                 "worker_answer_multi",
+                worker_routing="AskMultipleAgents",
+                phase="worker_completion",
                 agent_name=name,
                 base_model=getattr(agent, "base_model", None),
                 worker_prompt=prompt,
+                worker_response=text,
+                worker_response_kind="primary",
+                semantic_auxiliary_completions_count=n_aux_m,
+                semantic_metrics_include_auxiliary_samples=bool(extra),
+                same_prompt_completion_index_sent_to_ceo=0,
+                same_prompt_total_llm_completions=1 + n_aux_m,
                 user_question=user_question or None,
                 semantic_entropy=pe,
                 semantic_density=pd,
+                semantic_entropy_threshold=SEMANTIC_ENTROPY_THRESHOLD,
+                semantic_density_threshold=SEMANTIC_DENSITY_THRESHOLD,
                 semantic_quality_concern=concern_i,
                 worker_invocation_index=inv_m,
                 worker_reprompted_after_semantic_check=rep_m,
+                implied_ceo_decision_hint=multi_hint,
             )
 
         combined_response = "\n\n".join(
@@ -1135,11 +1185,16 @@ class AgentManager():
         }
         log_orchestration_event(
             "worker_answers_multi_combined",
+            worker_routing="AskMultipleAgents",
+            phase="multi_agent_round_summary",
             n_agents=len(per_agent_outputs),
             user_question=metrics_prompt,
             semantic_metric_scope=metric_scope,
             semantic_entropy=entropy,
             semantic_density=density,
+            semantic_entropy_threshold=SEMANTIC_ENTROPY_THRESHOLD,
+            semantic_density_threshold=SEMANTIC_DENSITY_THRESHOLD,
+            per_agent_outputs=per_agent_outputs,
         )
         return (
             result_dict,

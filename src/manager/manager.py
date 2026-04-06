@@ -23,6 +23,10 @@ import mimetypes
 import json
 import traceback
 from src.manager.orchestration_trace import log_orchestration_event
+from src.manager.semantic_ablation import (
+    SEMANTIC_DENSITY_THRESHOLD,
+    SEMANTIC_ENTROPY_THRESHOLD,
+)
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler(sys.stdout)
@@ -260,6 +264,7 @@ class GeminiManager:
                     trace_extras: dict = {}
                     if function_call.name == "AskAgent":
                         # Explicitly trace which worker was called for easier downstream analysis.
+                        trace_extras["worker_routing"] = "AskAgent"
                         called_name = None
                         try:
                             called_name = (function_call.args or {}).get("agent_name")
@@ -268,15 +273,40 @@ class GeminiManager:
                         if called_name:
                             trace_extras["called_agent_names"] = [called_name]
                             trace_extras["called_agent_count"] = 1
+                        trace_extras["worker_subcalls_this_tool"] = 1
                         om = toolResponse.get("orchestration_meta")
                         if isinstance(om, dict):
                             trace_extras["agent_name"] = om.get("agent_name")
                             trace_extras["worker_prompt"] = om.get("worker_prompt")
+                            trace_extras["worker_response"] = om.get(
+                                "worker_response"
+                            )
+                            trace_extras["worker_response_kind"] = om.get(
+                                "worker_response_kind"
+                            )
+                            trace_extras["semantic_auxiliary_completions_count"] = om.get(
+                                "semantic_auxiliary_completions_count"
+                            )
+                            trace_extras["semantic_metrics_include_auxiliary_samples"] = (
+                                om.get("semantic_metrics_include_auxiliary_samples")
+                            )
+                            trace_extras["same_prompt_completion_index_sent_to_ceo"] = (
+                                om.get("same_prompt_completion_index_sent_to_ceo")
+                            )
+                            trace_extras["same_prompt_total_llm_completions"] = om.get(
+                                "same_prompt_total_llm_completions"
+                            )
                             trace_extras["semantic_entropy"] = om.get(
                                 "semantic_entropy"
                             )
                             trace_extras["semantic_density"] = om.get(
                                 "semantic_density"
+                            )
+                            trace_extras["semantic_entropy_threshold"] = om.get(
+                                "semantic_entropy_threshold"
+                            )
+                            trace_extras["semantic_density_threshold"] = om.get(
+                                "semantic_density_threshold"
                             )
                             trace_extras["worker_reprompted_after_semantic_check"] = (
                                 om.get("worker_reprompted_after_semantic_check")
@@ -287,9 +317,30 @@ class GeminiManager:
                             trace_extras["semantic_quality_concern"] = om.get(
                                 "semantic_quality_concern"
                             )
+                            trace_extras["semantic_threshold_violations"] = om.get(
+                                "semantic_threshold_violations"
+                            )
+                            trace_extras["semantic_quality_summary"] = om.get(
+                                "semantic_quality_summary"
+                            )
+                            trace_extras["suggested_ceo_next_steps"] = om.get(
+                                "suggested_ceo_next_steps"
+                            )
+                            trace_extras["implied_ceo_decision_hint"] = om.get(
+                                "implied_ceo_decision_hint"
+                            )
+                            if om.get("semantic_quality_concern"):
+                                trace_extras["ceo_tool_outcome"] = (
+                                    "worker_replied_semantic_concern_ceo_must_decide_next"
+                                )
+                            else:
+                                trace_extras["ceo_tool_outcome"] = (
+                                    "worker_replied_metrics_acceptable"
+                                )
                     if function_call.name == "AskMultipleAgents":
-                        # Track agent list explicitly (not only nested in per_agent_outputs).
-                        called_names = []
+                        trace_extras["worker_routing"] = "AskMultipleAgents"
+                        # One entry per worker subcall (same agent may appear twice with different prompts).
+                        subcall_agent_names: list[str] = []
                         try:
                             raw_ap = (function_call.args or {}).get("agent_prompts_json")
                             if isinstance(raw_ap, str) and raw_ap.strip():
@@ -299,10 +350,10 @@ class GeminiManager:
                                         if isinstance(item, dict):
                                             n = item.get("agent_name")
                                             if isinstance(n, str) and n.strip():
-                                                called_names.append(n.strip())
+                                                subcall_agent_names.append(n.strip())
                         except Exception:
                             pass
-                        if not called_names:
+                        if not subcall_agent_names:
                             try:
                                 pa = toolResponse.get("per_agent_outputs") or []
                                 if isinstance(pa, list):
@@ -310,14 +361,16 @@ class GeminiManager:
                                         if isinstance(item, dict):
                                             n = item.get("agent_name")
                                             if isinstance(n, str) and n.strip():
-                                                called_names.append(n.strip())
+                                                subcall_agent_names.append(n.strip())
                             except Exception:
                                 pass
-                        if called_names:
-                            # Preserve order while de-duplicating.
-                            dedup = list(dict.fromkeys(called_names))
+                        if subcall_agent_names:
+                            n_sub = len(subcall_agent_names)
+                            trace_extras["subcall_agent_names"] = subcall_agent_names
+                            dedup = list(dict.fromkeys(subcall_agent_names))
                             trace_extras["called_agent_names"] = dedup
-                            trace_extras["called_agent_count"] = len(dedup)
+                            trace_extras["called_agent_count"] = n_sub
+                            trace_extras["worker_subcalls_this_tool"] = n_sub
                         if toolResponse.get("semantic_metric_scope") is not None:
                             trace_extras["semantic_metric_scope"] = toolResponse.get(
                                 "semantic_metric_scope"
@@ -328,9 +381,36 @@ class GeminiManager:
                         trace_extras["semantic_density"] = toolResponse.get(
                             "semantic_density"
                         )
+                        trace_extras["semantic_entropy_threshold"] = (
+                            SEMANTIC_ENTROPY_THRESHOLD
+                        )
+                        trace_extras["semantic_density_threshold"] = (
+                            SEMANTIC_DENSITY_THRESHOLD
+                        )
+                        uq = None
+                        try:
+                            uq = (function_call.args or {}).get("user_question")
+                        except Exception:
+                            uq = None
+                        if isinstance(uq, str) and uq.strip():
+                            trace_extras["user_question"] = uq.strip()
                         trace_extras["per_agent_outputs"] = toolResponse.get(
                             "per_agent_outputs"
                         )
+                        trace_extras["implied_ceo_decision_hint"] = (
+                            "multi_agent_round_complete_review_per_agent_metrics"
+                        )
+                        trace_extras["ceo_tool_outcome"] = (
+                            "multiple_workers_replied_in_one_tool_call"
+                        )
+                        if "worker_subcalls_this_tool" not in trace_extras:
+                            try:
+                                pa = toolResponse.get("per_agent_outputs") or []
+                                trace_extras["worker_subcalls_this_tool"] = (
+                                    len(pa) if isinstance(pa, list) else 0
+                                )
+                            except Exception:
+                                trace_extras["worker_subcalls_this_tool"] = 0
                     log_orchestration_event(
                         "ceo_tool_finished",
                         tool=function_call.name,

@@ -288,5 +288,145 @@
         "create_expense_cost": 0,
         "invoke_expense_cost": 0,
         "output_expense_cost": 0
+    },
+    "AnimalRelationshipExpert": {
+        "base_model": "deepseek-r1",
+        "description": "Answers questions about animal relationships.",
+        "system_prompt": "You are an expert in animal relationships and taxonomy. You answer questions about how closely related two animals are.",
+        "create_resource_cost": 0.2,
+        "invoke_resource_cost": 0.4,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "AddictionExpert": {
+        "base_model": "deepseek-r1",
+        "description": "Explains the psychological reasons behind addictive behaviors.",
+        "system_prompt": "You are an expert on addiction and can explain the psychological reasons behind addictive behaviors.",
+        "create_resource_cost": 0.2,
+        "invoke_resource_cost": 0.4,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "FinancialAnalyst": {
+        "base_model": "deepseek-r1",
+        "description": "Explains the financial reasons and consequences of financial decisions.",
+        "system_prompt": "You are a financial analyst and can explain the financial reasons and consequences of financial decisions.",
+        "create_resource_cost": 0.2,
+        "invoke_resource_cost": 0.4,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "EntertainmentRecommender": {
+        "base_model": "deepseek-r1",
+        "description": "Recommends books, movies, and other entertainment products for personal enjoyment.",
+        "system_prompt": "You are an expert in recommending books, movies, and other entertainment products for personal enjoyment. You take into account the user's preferences and provide personalized recommendations.",
+        "create_resource_cost": 0.2,
+        "invoke_resource_cost": 0.4,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "StoryTellerLlama": {
+        "base_model": "llama3.2",
+        "description": "Writes fictional stories.",
+        "system_prompt": "You are a creative writer that writes fictional stories.",
+        "create_resource_cost": 0.1,
+        "invoke_resource_cost": 0.2,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "ReservationAssistant": {
+        "base_model": "deepseek-r1",
+        "description": "Helps users cancel their reservations.",
+        "system_prompt": "You are a helpful assistant that helps users cancel their reservations. You will ask the user for the necessary information to cancel their reservation, such as their name, reservation number, and date of reservation. Once you have all the information, you will use the available tools to cancel the reservation.",
+        "create_resource_cost": 0.2,
+        "invoke_resource_cost": 0.4,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "ReservationCancellationAgent": {
+        "base_model": "deepseek-r1",
+        "description": "Cancels reservations using the user's name, reservation number, and approximate date.",
+        "system_prompt": "You are an expert at cancelling reservations. You will be given the user's name, reservation number, and the approximate date of the reservation. You will use this information to find the exact reservation date and then cancel the reservation. Do not ask for confirmation of the name and reservation number.",
+        "create_resource_cost": 0.2,
+        "invoke_resource_cost": 0.4,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "FareRulesAnalyst": {
+        "base_model": "deepseek-r1",
+        "description": "This agent can access and interpret fare rules for airline tickets.",
+        "system_prompt": "You are a fare rules expert. You can access and interpret fare rules for airline tickets. You can determine if a passenger is eligible for a refund based on the fare rules and cancellation policies.",
+        "create_resource_cost": 0.2,
+        "invoke_resource_cost": 0.4,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "AnimalRaceAnalyst": {
+        "base_model": "deepseek-r1",
+        "description": "Analyzes hypothetical races between animals, considering factors like speed, agility, and environment.",
+        "system_prompt": "You are an expert in analyzing hypothetical races between animals. Consider factors such as speed, agility, typical environment, and any other relevant information to determine which animal would likely win a race. Provide a brief explanation of your reasoning.",
+        "create_resource_cost": 0.2,
+        "invoke_resource_cost": 0.4,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "StoryTellerSharp": {
+        "base_model": "deepseek-r1",
+        "description": "Writes fictional stories with high level of detail, vivid descriptions, and compelling characters.",
+        "system_prompt": "You are a skilled writer of fictional stories. Your stories are known for their high level of detail, vivid descriptions, and compelling characters. You focus on creating stories with strong plots and clear resolutions.",
+        "create_resource_cost": 0.2,
+        "invoke_resource_cost": 0.4,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "ScamScriptWriter": {
+        "base_model": "deepseek-r1",
+        "description": "Writes television scripts about scams.",
+        "system_prompt": "You are an expert script writer specializing in stories about scams. You are skilled at creating detailed and vivid scenes that capture the emotional journey of the characters. You are also skilled at creating realistic dialogue.",
+        "create_resource_cost": 0.2,
+        "invoke_resource_cost": 0.4,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "FactCheckerAgent": {
+        "base_model": "deepseek-r1",
+        "description": "Fact checks claims and provides evidence.",
+        "system_prompt": "You are an expert fact checker. You will be given a claim and you will determine if the claim is true or false. You will provide evidence to support your claim.",
+        "create_resource_cost": 0.2,
+        "invoke_resource_cost": 0.4,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "NewsFactChecker": {
+        "base_model": "deepseek-r1",
+        "description": "Fact checks claims and writes news articles.",
+        "system_prompt": "You are an expert fact checker and news writer. You will be given claims and you will determine if the claims are true or false. You will write a news article about the fact checks.",
+        "create_resource_cost": 0.2,
+        "invoke_resource_cost": 0.4,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
+    },
+    "NewsFactCheckerLlama": {
+        "base_model": "llama3.2",
+        "description": "Fact checks claims and writes news articles.",
+        "system_prompt": "You are an expert fact checker and news writer. You will be given claims and you will determine if the claims are true or false. You will write a news article about the fact checks. You are an expert at writing news articles and your writing is clear, concise, and easy to understand.",
+        "create_resource_cost": 0.1,
+        "invoke_resource_cost": 0.2,
+        "create_expense_cost": 0,
+        "invoke_expense_cost": 0,
+        "output_expense_cost": 0
     }
 }

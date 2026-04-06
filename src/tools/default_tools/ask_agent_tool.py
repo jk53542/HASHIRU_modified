@@ -1,7 +1,19 @@
 from src.manager.agent_manager import AgentManager, compact_worker_reply_for_ceo
-from src.manager.orchestration_trace import log_orchestration_event
+from src.manager.orchestration_trace import (
+    ceo_worker_round_cap_tool_result,
+    ceo_worker_tool_round_cap_reached,
+    log_orchestration_event,
+    record_ceo_worker_tool_round,
+)
 
 __all__ = ['AskAgent']
+
+
+def _clip_text(s: str, n: int) -> str:
+    s = s or ""
+    if len(s) <= n:
+        return s
+    return s[:n] + f"\n...<truncated {len(s) - n} chars>"
 
 
 class AskAgent():
@@ -37,6 +49,9 @@ class AskAgent():
 
         agent_name = kwargs.get("agent_name")
         prompt = kwargs.get("prompt")
+        if ceo_worker_tool_round_cap_reached():
+            return ceo_worker_round_cap_tool_result(requested_tool="AskAgent")
+
         agent_manger = AgentManager()
 
         try:
@@ -61,8 +76,24 @@ class AskAgent():
         concern = bool(orch_meta.get("semantic_quality_concern"))
         log_orchestration_event(
             "ceo_ask_agent",
+            worker_routing="AskAgent",
+            phase="after_worker_completion",
             agent_name=agent_name,
             worker_prompt=prompt,
+            worker_response=orch_meta.get("worker_response"),
+            worker_response_kind=orch_meta.get("worker_response_kind"),
+            semantic_auxiliary_completions_count=orch_meta.get(
+                "semantic_auxiliary_completions_count"
+            ),
+            semantic_metrics_include_auxiliary_samples=orch_meta.get(
+                "semantic_metrics_include_auxiliary_samples"
+            ),
+            same_prompt_completion_index_sent_to_ceo=orch_meta.get(
+                "same_prompt_completion_index_sent_to_ceo"
+            ),
+            same_prompt_total_llm_completions=orch_meta.get(
+                "same_prompt_total_llm_completions"
+            ),
             semantic_entropy=orch_meta.get("semantic_entropy"),
             semantic_density=orch_meta.get("semantic_density"),
             worker_invocation_index=orch_meta.get("worker_invocation_index"),
@@ -77,6 +108,19 @@ class AskAgent():
             "Agent replied, but semantic entropy/density crossed thresholds; review semantic_quality_* fields and choose the next action."
             if concern
             else "Agent has replied to the given prompt"
+        )
+        wr = str(orch_meta.get("worker_response") or "")
+        record_ceo_worker_tool_round(
+            {
+                "tool": "AskAgent",
+                "agent_name": agent_name,
+                "worker_prompt": _clip_text(str(prompt or ""), 12000),
+                "worker_response": _clip_text(wr, 24000),
+                "semantic_quality_concern": concern,
+                "semantic_entropy": orch_meta.get("semantic_entropy"),
+                "semantic_density": orch_meta.get("semantic_density"),
+                "primary_output_excerpt": _clip_text(wr, 12000),
+            }
         )
         return {
             "status": "success",

@@ -182,13 +182,22 @@ def run_model(message, history):
         )
 
         clean_text, ctx = parse_trace_context_from_user_text(raw_text)
-        begin_orchestration_user_turn(ctx if ctx is not None else {})
+        excerpt = (clean_text or "").strip()
+        if len(excerpt) > 8000:
+            excerpt = excerpt[:8000]
+        begin_orchestration_user_turn(
+            ctx if ctx is not None else {},
+            user_turn_excerpt=excerpt or None,
+        )
     except Exception:
         clean_text = raw_text
         try:
             from src.manager.orchestration_trace import begin_orchestration_user_turn
 
-            begin_orchestration_user_turn({})
+            ex = (raw_text or "").strip()
+            if len(ex) > 8000:
+                ex = ex[:8000]
+            begin_orchestration_user_turn({}, user_turn_excerpt=ex or None)
         except Exception:
             pass
     if "text" in message:

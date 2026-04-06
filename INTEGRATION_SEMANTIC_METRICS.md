@@ -231,6 +231,19 @@ If every example returns **entropy = 0.0** and **density = 0.5** (or **density =
 
 ---
 
+## Orchestration JSONL and long benchmark runs
+
+`HASHIRU_ORCHESTRATION_TRACE_JSONL` can be set to either:
+
+1. **A path ending in `.jsonl`** — every event appends to that **single file** for the lifetime of the process. Use this when you run StrategyQA / TruthfulQA / JailbreakBench across many questions in one HASHIRU session so the trace is not fragmented.
+2. **A directory** — the first trace write creates `trace_<timestamp>_<pid>.jsonl`. If HASHIRU **restarts** mid-benchmark or the OS starts a **second server process**, later questions append to a **different file**, so one benchmark result JSONL may **not** have a matching single trace. This is **not** a split of one session; it is **multiple processes**.
+
+There is **no automatic merge** of per-process files. For analysis, either keep one server process and one trace file, or concatenate JSONL files in timestamp order (and de-duplicate `trace_session_start` lines if needed).
+
+`ceo_tool_finished` rows for `AskAgent` vs `AskMultipleAgents` include **`worker_routing`** (`AskAgent` = one worker per CEO tool call; `AskMultipleAgents` = parallel multi-worker tool) and **`worker_subcalls_this_tool`** (how many worker completions that tool accounted for). CEO **reprompts** are separate `AskAgent` completions (often with a new `worker_prompt`); they still appear as `worker_routing: AskAgent` but increment **total** worker call counts for that user turn.
+
+---
+
 ## 4. Summary
 
 | Question | Answer |

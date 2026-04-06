@@ -179,10 +179,11 @@ Returns the worker's first answer plus semantic_entropy / semantic_density when 
 If semantic_quality_concern is true, default thresholds were violated (entropy too high or density too low): treat the answer as suspect.
 The worker is NOT automatically re-prompted—you must decide the next step: manual reprompt (new AskAgent with clearer instructions), AskMultipleAgents, a different agent, or retiring a repeatedly bad worker.
 Read semantic_quality_summary and suggested_ceo_next_steps in the tool result.
+Per user message, the system allows only a limited number of AskAgent / AskMultipleAgents rounds (default: 5 reprompts after the first). If worker_round_cap_reached appears in the tool result, stop delegating and finalize from prior outputs.
 </action>
 
 <tool_name>AskMultipleAgents</tool_name>
-<action>Use for one question that needs multiple agents (e.g. medical + robotics). Semantic entropy and density are computed over ALL responses from ALL agents involved, so the metrics reflect agreement across the full set.</action>
+<action>Use for one question that needs multiple agents (e.g. medical + robotics). Semantic entropy and density are computed over ALL responses from ALL agents involved, so the metrics reflect agreement across the full set. Each AskMultipleAgents call counts as one worker round toward the same per-message cap as AskAgent.</action>
 
 <tool_name>compute_semantic_metrics</tool_name>
 <action>
