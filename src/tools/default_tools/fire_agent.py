@@ -1,4 +1,9 @@
 from src.manager.agent_manager import AgentManager
+from src.manager.ceo_decision_trace import (
+    extract_ceo_decision_fields,
+    fire_agent_rationale_properties,
+    fire_agent_rationale_required,
+)
 from src.manager.orchestration_trace import log_orchestration_event
 
 __all__ = ['FireAgent']
@@ -18,8 +23,9 @@ class FireAgent():
                     "type": "string",
                     "description": "Name of the AI agent that is to be fired. This name cannot have spaces or special characters. It should be a single word.",
                 },
+                **fire_agent_rationale_properties(),
             },
-            "required": ["agent_name"],
+            "required": ["agent_name", *fire_agent_rationale_required()],
         }
     }
 
@@ -44,6 +50,7 @@ class FireAgent():
             worker_prompt=None,
             semantic_entropy=None,
             semantic_density=None,
+            **extract_ceo_decision_fields(kwargs),
         )
         return {
             "status": "success",

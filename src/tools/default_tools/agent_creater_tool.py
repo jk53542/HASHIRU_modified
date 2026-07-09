@@ -1,4 +1,9 @@
 from src.manager.agent_manager import AgentManager
+from src.manager.ceo_decision_trace import (
+    agent_creator_rationale_properties,
+    agent_creator_rationale_required,
+    extract_ceo_decision_fields,
+)
 from src.manager.orchestration_trace import log_orchestration_event
 from src.tools.default_tools.agent_cost_manager import AgentCostManager
 __all__ = ['AgentCreator']
@@ -30,8 +35,15 @@ class AgentCreator():
                     "type": "string",
                     "description": "Description of the agent. This is a string that describes the agent and its capabilities. It should be a single line description.",
                 },
+                **agent_creator_rationale_properties(),
             },
-            "required": ["agent_name", "base_model", "system_prompt", "description"],
+            "required": [
+                "agent_name",
+                "base_model",
+                "system_prompt",
+                "description",
+                *agent_creator_rationale_required(),
+            ],
         }
     }
 
@@ -86,6 +98,7 @@ class AgentCreator():
             semantic_entropy=None,
             semantic_density=None,
             description=description,
+            **extract_ceo_decision_fields(kwargs),
         )
         return {
             "status": "success",

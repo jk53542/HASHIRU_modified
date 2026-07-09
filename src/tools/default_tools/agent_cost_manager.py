@@ -36,6 +36,12 @@ class AgentCostManager():
             "create_resource_cost": 20,
             "invoke_resource_cost": 100,
         },
+        "gemini-2.5-flash": {
+            "description": "Gemini 2.5 Flash (stable). Successor to deprecated gemini-2.0-flash.",
+            "create_expense_cost": 0,
+            "invoke_expense_cost": 0.15,
+            "output_expense_cost": 0.60,
+        },
         "gemini-2.5-flash-preview-05-20": {
             "description": "Avg Accuracy: 75.8%, 82.8% on LegalBench, 81.6% on multi-task understanding, 91.6% on Math",
             "create_expense_cost": 0,
@@ -85,7 +91,10 @@ class AgentCostManager():
             "output_expense_cost": 0.04,
         },
         "chatgpt-5.4": {
-            "description": "OpenAI-hosted ChatGPT 5.4 (remote API); supports strong reasoning and optional logprobs path",
+            "description": (
+                "OpenAI-hosted GPT-5.4 via API (worker id chatgpt-5.4; requests use model gpt-5.4, "
+                "override with HASHIRU_OPENAI_CHATGPT_54_MODEL_ID). Optional logprobs path when supported."
+            ),
             "create_expense_cost": 0,
             "invoke_expense_cost": 1.25,
             "output_expense_cost": 10.00,

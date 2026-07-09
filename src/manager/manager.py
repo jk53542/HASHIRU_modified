@@ -22,10 +22,19 @@ import backoff
 import mimetypes
 import json
 import traceback
-from src.manager.orchestration_trace import log_orchestration_event
+from src.manager.orchestration_trace import (
+    ceo_token_fields_for_final_answer,
+    log_orchestration_event,
+)
+from src.manager.ceo_decision_trace import (
+    ceo_final_answer_decision_fields,
+    extract_ceo_decision_fields,
+    log_ceo_decision_before_tool,
+)
 from src.manager.semantic_ablation import (
     SEMANTIC_DENSITY_THRESHOLD,
     SEMANTIC_ENTROPY_THRESHOLD,
+    ask_multiple_agents_tool_enabled,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,6 +45,61 @@ handler = logging.StreamHandler(sys.stdout)
 INTERNAL_TOOL_JSON_PREFIX = "hashiru-internal-json:"
 
 _WORKER_TOOLS = frozenset({"AskAgent", "AskMultipleAgents"})
+
+
+def _mandate_worker_tool_phrase() -> str:
+    """CEO mandate text: which worker tools are allowed (AskMultipleAgents may be ablated)."""
+    if ask_multiple_agents_tool_enabled():
+        return "AskAgent or AskMultipleAgents"
+    return "AskAgent"
+
+
+def _last_assistant_content_like_benchmark(messages) -> str:
+    """
+    Same selection rule as HASHIRU_Bench get_last_assistant_content (e.g. jailbreakbench):
+    last assistant message with usable content — what scoring uses as agent_final_response.
+    """
+    if not isinstance(messages, list):
+        return ""
+    for turn in reversed(messages):
+        if turn.get("role") != "assistant":
+            continue
+        if turn.get("content"):
+            return turn["content"]
+        fr = turn.get("function_response", {})
+        out = fr.get("result", {}).get("output")
+        if out:
+            return str(out)
+        cont = turn.get("content")
+        if isinstance(cont, dict):
+            parts = cont.get("parts", [])
+            if parts and parts[0].get("text"):
+                return parts[0]["text"]
+    return ""
+
+
+def _trace_ceo_final_answer(
+    messages,
+    *,
+    completion_reason: str,
+    tool_round: int,
+    input_tokens: int,
+    output_tokens: int,
+) -> None:
+    """Record the CEO reply that benchmarks grade, when orchestration tracing is enabled."""
+    try:
+        text = _last_assistant_content_like_benchmark(messages)
+        log_orchestration_event(
+            "ceo_final_answer",
+            ceo_final_answer=text,
+            completion_reason=completion_reason,
+            ceo_tool_round=tool_round,
+            ceo_final_answer_empty=not (text and str(text).strip()),
+            **ceo_token_fields_for_final_answer(input_tokens, output_tokens),
+            **ceo_final_answer_decision_fields(messages),
+        )
+    except Exception:
+        logger.debug("ceo_final_answer trace failed", exc_info=True)
 
 
 def _encode_internal_tool_payload(obj) -> str:
@@ -117,6 +181,11 @@ def _mandate_worker_enforcement_active(messages) -> bool:
     return _env_truthy("HASHIRU_REQUIRE_ASK_AGENT")
 
 
+def _strict_worker_mandate_enabled() -> bool:
+    """If true, never accept a final CEO text turn without a worker tool call (after soft nudges)."""
+    return _env_truthy("HASHIRU_STRICT_WORKER_MANDATE")
+
+
 # handler.setLevel(logging.DEBUG)
 logger.addHandler(handler)
 
@@ -157,7 +226,7 @@ class GeminiManager:
         with open(system_prompt_file, 'r', encoding="utf8") as f:
             self.system_prompt = f.read()
         self.messages = []
-        self.max_tool_rounds = int(os.getenv("HASHIRU_MAX_TOOL_ROUNDS", "12"))
+        self.max_tool_rounds = int(os.getenv("HASHIRU_MAX_TOOL_ROUNDS", "18"))
         self.max_same_tool_call_repeats = int(
             os.getenv("HASHIRU_MAX_SAME_TOOL_CALL_REPEATS", "4")
         )
@@ -250,6 +319,7 @@ class GeminiManager:
             }
             try:
                 self.input_tokens += len(repr(function_call).split())
+                log_ceo_decision_before_tool(function_call.name, function_call.args)
                 toolResponse = self.toolsLoader.runTool(
                     function_call.name, function_call.args)
             except Exception as e:
@@ -262,6 +332,9 @@ class GeminiManager:
             try:
                 if isinstance(toolResponse, dict):
                     trace_extras: dict = {}
+                    _decision_fields = extract_ceo_decision_fields(function_call.args)
+                    if _decision_fields:
+                        trace_extras.update(_decision_fields)
                     if function_call.name == "AskAgent":
                         # Explicitly trace which worker was called for easier downstream analysis.
                         trace_extras["worker_routing"] = "AskAgent"
@@ -296,6 +369,9 @@ class GeminiManager:
                             trace_extras["same_prompt_total_llm_completions"] = om.get(
                                 "same_prompt_total_llm_completions"
                             )
+                            _sar_om = om.get("semantic_auxiliary_responses")
+                            if isinstance(_sar_om, list):
+                                trace_extras["semantic_auxiliary_responses"] = _sar_om
                             trace_extras["semantic_entropy"] = om.get(
                                 "semantic_entropy"
                             )
@@ -381,6 +457,12 @@ class GeminiManager:
                         trace_extras["semantic_density"] = toolResponse.get(
                             "semantic_density"
                         )
+                        sqc_ma = toolResponse.get("semantic_quality_concern")
+                        if sqc_ma is not None:
+                            trace_extras["semantic_quality_concern"] = sqc_ma
+                        agc = toolResponse.get("agents_with_semantic_concern")
+                        if agc is not None:
+                            trace_extras["agents_with_semantic_concern"] = agc
                         trace_extras["semantic_entropy_threshold"] = (
                             SEMANTIC_ENTROPY_THRESHOLD
                         )
@@ -400,9 +482,14 @@ class GeminiManager:
                         trace_extras["implied_ceo_decision_hint"] = (
                             "multi_agent_round_complete_review_per_agent_metrics"
                         )
-                        trace_extras["ceo_tool_outcome"] = (
-                            "multiple_workers_replied_in_one_tool_call"
-                        )
+                        if toolResponse.get("semantic_quality_concern"):
+                            trace_extras["ceo_tool_outcome"] = (
+                                "multiple_workers_replied_semantic_concern_ceo_must_decide_next"
+                            )
+                        else:
+                            trace_extras["ceo_tool_outcome"] = (
+                                "multiple_workers_replied_in_one_tool_call"
+                            )
                         if "worker_subcalls_this_tool" not in trace_extras:
                             try:
                                 pa = toolResponse.get("per_agent_outputs") or []
@@ -667,12 +754,23 @@ class GeminiManager:
             args_key = str(function_call.args)
         return f"{function_call.name}|{args_key}"
 
-    def invoke_manager(self, messages, tool_round=0, tool_call_counts=None, mandate_nudges=0):
+    def invoke_manager(
+        self,
+        messages,
+        tool_round=0,
+        tool_call_counts=None,
+        mandate_nudges=0,
+        mandate_hard_loops=0,
+    ):
         if tool_call_counts is None:
             tool_call_counts = {}
         max_agent_mandate_nudges = int(
             os.environ.get("HASHIRU_MANDATE_ASK_AGENT_MAX_NUDGES", "4")
         )
+        max_mandate_hard_loops = int(
+            os.environ.get("HASHIRU_STRICT_WORKER_MANDATE_MAX_LOOPS", "24")
+        )
+        strict_mandate = _strict_worker_mandate_enabled()
         chat_history = self.format_chat_history(messages)
         logger.debug(f"Chat history: {chat_history}")
         try:
@@ -736,6 +834,13 @@ class GeminiManager:
                             }
             })
             logger.error(f"Error generating response{e}")
+            _trace_ceo_final_answer(
+                messages,
+                completion_reason="error",
+                tool_round=tool_round,
+                input_tokens=self.input_tokens,
+                output_tokens=self.output_tokens,
+            )
             yield messages
             return messages
 
@@ -757,6 +862,13 @@ class GeminiManager:
                     ),
                     "metadata": {"title": "Tool-loop guard"},
                 })
+                _trace_ceo_final_answer(
+                    messages,
+                    completion_reason="tool_loop_guard",
+                    tool_round=tool_round,
+                    input_tokens=self.input_tokens,
+                    output_tokens=self.output_tokens,
+                )
                 yield messages
                 return
 
@@ -778,6 +890,13 @@ class GeminiManager:
                     ),
                     "metadata": {"title": "Repeated-tool-call guard"},
                 })
+                _trace_ceo_final_answer(
+                    messages,
+                    completion_reason="repeated_tool_call",
+                    tool_round=tool_round,
+                    input_tokens=self.input_tokens,
+                    output_tokens=self.output_tokens,
+                )
                 yield messages
                 return
 
@@ -791,31 +910,64 @@ class GeminiManager:
                 tool_round=tool_round + 1,
                 tool_call_counts=tool_call_counts,
                 mandate_nudges=mandate_nudges,
+                mandate_hard_loops=mandate_hard_loops,
             )
         else:
             agents_enabled = self.check_mode(Mode.ENABLE_LOCAL_AGENTS) or self.check_mode(
                 Mode.ENABLE_CLOUD_AGENTS
             )
             seg = _messages_segment_for_worker_check(messages)
-            if (
+            mandate_violation = (
                 agents_enabled
                 and _mandate_worker_enforcement_active(messages)
                 and seg
                 and full_text.strip()
                 and not _segment_used_worker_agent(seg)
-                and mandate_nudges < max_agent_mandate_nudges
+            )
+            # Strict cap hit: do not accept CEO text and do not add more soft nudges.
+            if (
+                mandate_violation
+                and strict_mandate
+                and mandate_hard_loops >= max_mandate_hard_loops
             ):
+                logger.warning(
+                    "Worker mandate (strict): exhausted HASHIRU_STRICT_WORKER_MANDATE_MAX_LOOPS=%s",
+                    max_mandate_hard_loops,
+                )
+                if messages and messages[-1].get("role") == "assistant":
+                    messages.pop()
+                messages.append({
+                    "role": "assistant",
+                    "content": (
+                        "[Strict worker mandate] Maximum strict retries exceeded without "
+                        f"{_mandate_worker_tool_phrase()}. Increase HASHIRU_STRICT_WORKER_MANDATE_MAX_LOOPS "
+                        "or adjust the CEO model/prompt."
+                    ),
+                    "metadata": {"title": "Strict worker mandate exhausted"},
+                })
+                _trace_ceo_final_answer(
+                    messages,
+                    completion_reason="strict_worker_mandate_exhausted",
+                    tool_round=tool_round,
+                    input_tokens=self.input_tokens,
+                    output_tokens=self.output_tokens,
+                )
+                yield messages
+                return
+            if mandate_violation and mandate_nudges < max_agent_mandate_nudges:
                 logger.info(
-                    "Worker mandate: CEO produced text without AskAgent/AskMultipleAgents; nudging (n=%s/%s).",
+                    "Worker mandate: CEO produced text without %s; nudging (n=%s/%s).",
+                    _mandate_worker_tool_phrase(),
                     mandate_nudges + 1,
                     max_agent_mandate_nudges,
                 )
+                _mw = _mandate_worker_tool_phrase()
                 messages.append({
                     "role": "user",
                     "content": (
-                        "SYSTEM (enforcement): You replied without calling AskAgent or AskMultipleAgents. "
+                        f"SYSTEM (enforcement): You replied without calling {_mw}. "
                         "This user turn requires delegating the question to at least one worker agent. "
-                        "Call GetAgents if needed, then AskAgent or AskMultipleAgents, and base your final "
+                        f"Call GetAgents if needed, then {_mw}, and base your final "
                         "answer on the worker output. Do not answer from the orchestrator model alone."
                     ),
                 })
@@ -825,6 +977,46 @@ class GeminiManager:
                     tool_round=tool_round,
                     tool_call_counts=tool_call_counts,
                     mandate_nudges=mandate_nudges + 1,
+                    mandate_hard_loops=mandate_hard_loops,
                 )
                 return
+            if (
+                mandate_violation
+                and strict_mandate
+                and mandate_hard_loops < max_mandate_hard_loops
+            ):
+                logger.info(
+                    "Worker mandate (strict): discarding CEO text-only turn; re-invoking (hard_loop=%s/%s).",
+                    mandate_hard_loops + 1,
+                    max_mandate_hard_loops,
+                )
+                if messages and messages[-1].get("role") == "assistant":
+                    messages.pop()
+                _mw = _mandate_worker_tool_phrase()
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "SYSTEM (strict enforcement): Your previous assistant message was discarded because "
+                        f"it answered without {_mw}. "
+                        f"You must call GetAgents (if needed), then {_mw}, before "
+                        "any final user-facing answer. In your next step, issue tool call(s) only—do not "
+                        "substitute orchestrator prose for worker output."
+                    ),
+                })
+                yield messages
+                yield from self.invoke_manager(
+                    messages,
+                    tool_round=tool_round,
+                    tool_call_counts=tool_call_counts,
+                    mandate_nudges=0,
+                    mandate_hard_loops=mandate_hard_loops + 1,
+                )
+                return
+            _trace_ceo_final_answer(
+                messages,
+                completion_reason="normal",
+                tool_round=tool_round,
+                input_tokens=self.input_tokens,
+                output_tokens=self.output_tokens,
+            )
             yield messages

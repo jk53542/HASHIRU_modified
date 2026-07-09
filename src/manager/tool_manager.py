@@ -6,6 +6,7 @@ import pip
 from google.genai import types
 
 from src.manager.budget_manager import BudgetManager
+from src.manager.semantic_ablation import ask_multiple_agents_tool_enabled
 from src.manager.utils.singleton import singleton
 from src.manager.utils.suppress_outputs import suppress_output
 from src.tools.default_tools.tool_deletor import ToolDeletor
@@ -146,6 +147,15 @@ class ToolManager:
     def runTool(self, toolName, query):
         if not self.is_invocation_enabled:
             raise Exception("Tool invocation mode is disabled")
+        if toolName == "AskMultipleAgents" and not ask_multiple_agents_tool_enabled():
+            return {
+                "status": "error",
+                "message": (
+                    "AskMultipleAgents is disabled (set HASHIRU_ENABLE_ASK_MULTIPLE_AGENTS=1 to enable). "
+                    "Use AskAgent for each worker delegation."
+                ),
+                "output": None,
+            }
         if toolName == "ToolCreator":
             if not self.is_creation_enabled:
                 raise Exception("Tool creation mode is disabled")
@@ -173,6 +183,8 @@ class ToolManager:
             return []
         toolsList = []
         for tool in self.toolsImported:
+            if tool.name == "AskMultipleAgents" and not ask_multiple_agents_tool_enabled():
+                continue
             parameters = types.Schema()
             parameters.type = tool.inputSchema["parameters"]["type"]
             properties = {}

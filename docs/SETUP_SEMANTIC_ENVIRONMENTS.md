@@ -17,12 +17,14 @@ It does **not** import the semantic_uncertainty or semantic_density code. So it 
 
 **Summary:**
 
-| Component              | Environment to use      |
-|------------------------|-------------------------|
-| HASHIRU app            | HASHIRU venv (already set up) |
-| FastAPI service wrapper| **Same as HASHIRU** (no extra env) |
-| Semantic entropy service | **New env:** semantic_uncertainty |
-| Semantic density service | **New env:** semantic_density |
+
+| Component                | Environment to use                 |
+| ------------------------ | ---------------------------------- |
+| HASHIRU app              | HASHIRU venv (already set up)      |
+| FastAPI service wrapper  | **Same as HASHIRU** (no extra env) |
+| Semantic entropy service | **New env:** semantic_uncertainty  |
+| Semantic density service | **New env:** semantic_density      |
+
 
 The two *backend* services (entropy and density) must run in their own environments because they use different versions of PyTorch, Transformers, etc.
 
@@ -43,82 +45,60 @@ This repo uses **Python 3.11** and PyTorch with CUDA 11.8.
 ### Option A: Conda (recommended)
 
 1. **Open a terminal** and go to the semantic_uncertainty repo:
-   ```bash
+  ```bash
    cd /home/knowltjo/hashiru_modified/semantic_uncertainty
-   ```
+  ```
    (Adjust the path if your project lives elsewhere.)
-
 2. **Create the environment** from the source file (this is more portable than the full export):
-   ```bash
+  ```bash
    conda env create -f environment.yaml
-   ```
-   - Environment name will be `semantic_uncertainty` (from the `name:` in the file).
-   - First run can take 10–20 minutes while conda resolves and installs packages.
-
+  ```
+  - Environment name will be `semantic_uncertainty` (from the `name:` in the file).
+  - First run can take 10–20 minutes while conda resolves and installs packages.
 3. **Activate it:**
-   ```bash
+  ```bash
    conda activate semantic_uncertainty
-   ```
-
+  ```
 4. **Verify the stack:**
-   ```bash
+  ```bash
    python -c "import torch; print(torch.__version__)"
    python -c "import transformers; print(transformers.__version__)"
-   ```
+  ```
    You should see the versions conda installed (e.g. PyTorch 2.x, Transformers 4.x).
-
-5. **Verify the entropy module can be imported:**  
-   The repo uses top-level imports `from uncertainty.xxx`, so the directory that *contains* the `uncertainty` folder must be on `PYTHONPATH` (the **inner** `semantic_uncertainty` folder). From the repo root:
-   ```bash
-   cd /home/knowltjo/hashiru_modified/semantic_uncertainty
-   export PYTHONPATH="$(pwd)/semantic_uncertainty:$PYTHONPATH"
-   python -c "
-   from uncertainty.uncertainty_measures.semantic_entropy import (
-       get_semantic_ids, cluster_assignment_entropy
-   )
-   print('semantic_entropy imports OK')
-   "
-   ```
+5. **Verify the entropy module can be imported:**
+  The repo uses top-level imports `from uncertainty.xxx`, so the directory that *contains* the `uncertainty` folder must be on `PYTHONPATH` (the **inner** `semantic_uncertainty` folder). From the repo root:
    If you see `semantic_entropy imports OK`, the environment is ready for building an entropy service.  
    **Tip:** For any script or service you run in this repo, set `PYTHONPATH` the same way (or add it to your shell profile when working in this env).
-
 6. **Deactivate when done:**
-   ```bash
+  ```bash
    conda deactivate
-   ```
+  ```
 
 ### Option B: venv + pip (alternative)
 
 Use this only if you cannot or do not want to use conda. You will need to align PyTorch/CUDA versions manually.
 
 1. **Create and activate a venv** (Python 3.11 recommended):
-   ```bash
+  ```bash
    cd /home/knowltjo/hashiru_modified/semantic_uncertainty
    python3.11 -m venv .venv_entropy
    source .venv_entropy/bin/activate   # Linux/WSL
-   ```
-
+  ```
 2. **Install PyTorch with CUDA 11.8** (match the conda env):
-   ```bash
+  ```bash
    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-   ```
-
+  ```
 3. **Install the rest** (from `environment.yaml` pip section):
-   ```bash
+  ```bash
    pip install "transformers>=4.31" evaluate datasets scikit-learn pandas scipy \
      wandb tokenizers accelerate omegaconf nltk tenacity sentencepiece safetensors \
      openai tiktoken einops ml_collections torchmetrics
-   ```
-
+  ```
 4. **Install the package in editable mode** so imports like `semantic_uncertainty.uncertainty...` work:
-   ```bash
+  ```bash
    pip install -e .
-   ```
+  ```
    If the repo has no `setup.py` or `pyproject.toml`, set `PYTHONPATH` to the repo root when you run scripts:
-   ```bash
-   export PYTHONPATH=/home/knowltjo/hashiru_modified/semantic_uncertainty
-   ```
-
 5. Run the same import check as in step 5 of Option A.
 
 ---
@@ -130,60 +110,43 @@ This repo uses **Python 3.10** and a pinned set of packages (including PyTorch, 
 ### Option A: Conda using the full export (if it works on your OS)
 
 1. **Go to the semantic-density-paper repo:**
-   ```bash
+  ```bash
    cd /home/knowltjo/hashiru_modified/semantic-density-paper
-   ```
-
+  ```
 2. **Create the environment:**
-   ```bash
+  ```bash
    conda env create -f environment_llama3.yml
-   ```
-   - Name will be `semantic_density_llama3`.
-   - If creation fails (e.g. platform or prefix issues), use Option B.
-
+  ```
+  - Name will be `semantic_density_llama3`.
+  - If creation fails (e.g. platform or prefix issues), use Option B.
 3. **Activate:**
-   ```bash
+  ```bash
    conda activate semantic_density_llama3
-   ```
-
+  ```
 4. **Verify:**
-   ```bash
+  ```bash
    python -c "import torch; print(torch.__version__)"
    python -c "import transformers; print(transformers.__version__)"
-   ```
-
-5. **Verify semantic_metrics (used for density):**  
-   The repo uses `experiment_code/` as the working directory for imports (no package install). From repo root:
-   ```bash
-   cd experiment_code
-   python -c "
-   from semantic_metrics import (
-       compute_semantic_density_from_similarity_matrix,
-       compute_semantic_density_from_text_responses,
-   )
-   print('semantic_metrics imports OK')
-   "
-   ```
+  ```
+5. **Verify semantic_metrics (used for density):**
+  The repo uses `experiment_code/` as the working directory for imports (no package install). From repo root:
    Always run your density service from `semantic-density-paper/experiment_code` (or set `PYTHONPATH` to that folder).
 
 5b. **For meaningful semantic density (recommended):** The density pipeline uses real sentence embeddings when `sentence-transformers` is available. Install it in the density env:
-   ```bash
-   pip install sentence-transformers
-   ```
+
    Without it, the service falls back to fake embeddings and density values will be unreliable (often 0 or near 0).
 
-6. **Deactivate:**
-   ```bash
+1. **Deactivate:**
+  ```bash
    conda deactivate
-   ```
+  ```
 
 ### Option B: Conda with a hand-written env file (no prefix)
 
 If `environment_llama3.yml` fails (e.g. different Linux or prefix), create a minimal env that matches the repo’s needs:
 
 1. **Create a new file** `environment_minimal.yml` in `semantic-density-paper/`:
-
-   ```yaml
+  ```yaml
    name: semantic_density
    channels:
      - pytorch
@@ -206,29 +169,28 @@ If `environment_llama3.yml` fails (e.g. different Linux or prefix), create a min
          - wandb
          - sentencepiece
          - safetensors
-   ```
-
+  ```
 2. **Create and activate:**
-   ```bash
+  ```bash
    cd /home/knowltjo/hashiru_modified/semantic-density-paper
    conda env create -f environment_minimal.yml
    conda activate semantic_density
-   ```
-
+  ```
 3. **Install any missing deps** the experiment scripts need (e.g. `rouge-score`, `nltk`) by running the script once and doing `pip install <package>` for import errors.
-
 4. Run the same `semantic_metrics` import check as in Option A step 5 (from `experiment_code`).
 
 ---
 
 ## Part 3: Quick reference – where to run what
 
-| What you run                | Command / env           |
-|----------------------------|-------------------------|
-| HASHIRU                    | Activate HASHIRU venv → `python app.py` (or your entrypoint) |
-| FastAPI metrics wrapper    | **Same HASHIRU venv** → `uvicorn service_wrapper.comm_app:app --host 127.0.0.1 --port 8123` (from project root so `service_wrapper` is importable) |
-| Entropy backend service    | See “Start entropy service” below (requires PYTHONPATH). |
-| Density backend service   | `conda activate semantic_density` → `cd .../experiment_code` → `uvicorn density_service:app --host 127.0.0.1 --port 8125` |
+
+| What you run            | Command / env                                                                                                                                      |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| HASHIRU                 | Activate HASHIRU venv → `python app.py` (or your entrypoint)                                                                                       |
+| FastAPI metrics wrapper | **Same HASHIRU venv** → `uvicorn service_wrapper.comm_app:app --host 127.0.0.1 --port 8123` (from project root so `service_wrapper` is importable) |
+| Entropy backend service | See “Start entropy service” below (requires PYTHONPATH).                                                                                           |
+| Density backend service | `conda activate semantic_density` → `cd .../experiment_code` → `uvicorn density_service:app --host 127.0.0.1 --port 8125`                          |
+
 
 **Ports matter:** the gateway calls **entropy** at 8124 and **density** at 8125. If you start entropy on 8125 and density on 8124, the gateway will still use the returned values (it detects responses by key), but for clarity run entropy on **8124** and density on **8125**.
 
@@ -260,6 +222,7 @@ uvicorn service_wrapper.comm_app:app --host 127.0.0.1 --port 8123
 ```
 
 **Example: activate entropy env and run a future entropy service**  
+
 ```bash
 conda activate semantic_uncertainty
 cd /home/knowltjo/hashiru_modified/semantic_uncertainty
@@ -267,6 +230,7 @@ cd /home/knowltjo/hashiru_modified/semantic_uncertainty
 ```
 
 **Example: activate density env and run a future density service**  
+
 ```bash
 conda activate semantic_density_llama3
 cd /home/knowltjo/hashiru_modified/semantic-density-paper/experiment_code
@@ -372,7 +336,7 @@ After any fix, restart the density service; you should see **"Using SentenceTran
 - **Import errors for `semantic_uncertainty` or `semantic_metrics`:**  
   - **semantic_uncertainty:** The code imports `from uncertainty.xxx`, so `PYTHONPATH` must include the **inner** package directory (the folder that contains `uncertainty/`), e.g. `export PYTHONPATH=/path/to/semantic_uncertainty/semantic_uncertainty:$PYTHONPATH`. Then use `from uncertainty.uncertainty_measures.semantic_entropy import ...`.  
   - **semantic_density:** Run from `semantic-density-paper/experiment_code` or set `PYTHONPATH` to that folder.
-- **`prefix` in yaml:** If the yaml contains `prefix: /some/path`, you can delete that line and run `conda env create -f ...` again so conda uses your default envs directory.
+- `**prefix` in yaml:** If the yaml contains `prefix: /some/path`, you can delete that line and run `conda env create -f ...` again so conda uses your default envs directory.
 
 ### Semantic density: `safetensors` / pip conflict (ResolutionImpossible)
 
@@ -396,9 +360,9 @@ When the entropy or density service starts, you will see many HTTP requests to `
 
 If **entropy = 0.0** always, the NLI model is putting all responses in one semantic cluster. You can try:
 
-1. **`STRICT_ENTAILMENT=false`** – looser clustering (fewer pairs count as equivalent).
-2. **`ENTAILMENT_THRESHOLD=0.9`** (or `0.95`) – use probability-based equivalence: two responses are in the same cluster only if both directions have P(entailment) ≥ this value. Higher values give more clusters. Set in the env where you start the entropy service, e.g. `export ENTAILMENT_THRESHOLD=0.95`.
-3. **`ENTROPY_LAST_N_WORDS=200`** – use the last 200 words of each response instead of 100 so more variation is included (default 100). Use **4+ samples** per prompt (HASHIRU uses 4 by default).
+1. `**STRICT_ENTAILMENT=false`** – looser clustering (fewer pairs count as equivalent).
+2. `**ENTAILMENT_THRESHOLD=0.9**` (or `0.95`) – use probability-based equivalence: two responses are in the same cluster only if both directions have P(entailment) ≥ this value. Higher values give more clusters. Set in the env where you start the entropy service, e.g. `export ENTAILMENT_THRESHOLD=0.95`.
+3. `**ENTROPY_LAST_N_WORDS=200**` – use the last 200 words of each response instead of 100 so more variation is included (default 100). Use **4+ samples** per prompt (HASHIRU uses 4 by default).
 
 ---
 

@@ -8,6 +8,13 @@ back to Ollama's OpenAI-compatible `/v1/chat/completions` endpoint (also with
 Env:
   OLLAMA_HOST   — default http://127.0.0.1:11434
   HASHIRU_OLLAMA_TOP_LOGPROBS — default 5 (top alternatives per token)
+  HASHIRU_OLLAMA_CHAT_TIMEOUT — seconds for each logprob HTTP request (default 1200).
+  HASHIRU_OLLAMA_LOGPROBS — set 0 to force-disable logprobs even when semantic metrics are on.
+  HASHIRU_OLLAMA_SKIP_HTTP_LOGPROBS_REASONING — default 1: skip HTTP logprobs for known long-CoT
+    Ollama bases (e.g. DeepSeek-R1); use ``ollama.chat`` instead. Extras still supply text samples.
+  HASHIRU_OLLAMA_FORCE_HTTP_LOGPROBS — set 1 to always try HTTP logprobs when enabled.
+
+Note: With semantic sampling off, ``OllamaAgent`` uses native ``ollama.chat`` only.
 """
 from __future__ import annotations
 
@@ -25,13 +32,34 @@ logger = logging.getLogger(__name__)
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 TOP_LOGPROBS = int(os.getenv("HASHIRU_OLLAMA_TOP_LOGPROBS", "5"))
-CHAT_TIMEOUT = float(os.getenv("HASHIRU_OLLAMA_CHAT_TIMEOUT", "600"))
+CHAT_TIMEOUT = float(os.getenv("HASHIRU_OLLAMA_CHAT_TIMEOUT", "1200"))
 
 
 def ollama_logprobs_feature_enabled() -> bool:
     """Master switch; logprobs are only requested for open-weight Ollama bases when this is on."""
     v = os.getenv("HASHIRU_OLLAMA_LOGPROBS", "1").strip().lower()
     return v not in ("0", "false", "no", "off")
+
+
+def ollama_http_logprobs_viable_for_model(model_id: str) -> bool:
+    """
+    Use HTTP logprob chat for this model id. Long chain-of-thought models often exceed client
+    timeouts on ``/api/chat`` with logprobs (Ollama 500 after ~CHAT_TIMEOUT seconds).
+    """
+    if os.getenv("HASHIRU_OLLAMA_FORCE_HTTP_LOGPROBS", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    ):
+        return True
+    if os.getenv("HASHIRU_OLLAMA_SKIP_HTTP_LOGPROBS_REASONING", "1").strip().lower() in (
+        "0", "false", "no", "off",
+    ):
+        return True
+    m = (model_id or "").lower()
+    if any(x in m for x in ("qwq", "o1-preview", "o1-mini", "deepseek-r1", "deepseek r1")):
+        return False
+    if "r1" in m and any(x in m for x in ("deepseek", "qwen", "llama", "dolphin")):
+        return False
+    return True
 
 
 def sum_chosen_token_logprobs(logprobs: Any) -> float | None:

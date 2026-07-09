@@ -23,6 +23,7 @@ from src.metrics.semantic_metrics import compute_semantic_metrics_both
 from src.manager.worker_model_policy import assert_base_model_allowed, is_base_model_allowed
 from src.manager.orchestration_trace import (
     log_orchestration_event,
+    trace_include_semantic_auxiliary_responses,
     worker_invocation_reprompt_flags,
 )
 from src.manager.semantic_ablation import (
@@ -38,8 +39,14 @@ from src.manager.semantic_ablation import (
 MODEL_PATH = "./src/models/"
 MODEL_FILE_PATH = "./src/models/models.json"
 
-# Extra stochastic completions per worker turn (same prompt) so entropy/density have multiple hypotheses.
-NUM_EXTRA_RESPONSES_FOR_SEMANTIC = 4  # paper-style: 4+ samples; failures use `continue` so others still run.
+def num_extra_responses_for_semantic() -> int:
+    """Stochastic samples per AskAgent for entropy/density. Env: HASHIRU_SEMANTIC_EXTRA_SAMPLES (default 4)."""
+    raw = os.getenv("HASHIRU_SEMANTIC_EXTRA_SAMPLES", "4").strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        n = 4
+    return max(0, min(n, 16))
 
 
 def semantic_sample_temperature() -> Optional[float]:
@@ -233,13 +240,20 @@ class OllamaAgent(Agent):
         from src.manager.ollama_logprobs import (
             ollama_chat_with_logprobs,
             ollama_logprobs_feature_enabled,
+            ollama_http_logprobs_viable_for_model,
         )
+        from src.manager.semantic_ablation import semantic_metrics_sampling_enabled
 
         temperature = kwargs.get("temperature")
 
-        # Try Ollama logprobs for any local Ollama model. Not all models/builds expose it;
-        # failures are handled by the fallback chat path below.
-        if ollama_logprobs_feature_enabled():
+        # HTTP logprobs use a finite client timeout; long-CoT models often hit 500 after ~600s. When
+        # ollama_http_logprobs_viable_for_model is false, use ollama.chat (extras still add text samples).
+        # If both semantic branches are off, semantic_metrics_sampling_enabled() is false → library chat only.
+        if (
+            ollama_logprobs_feature_enabled()
+            and semantic_metrics_sampling_enabled()
+            and ollama_http_logprobs_viable_for_model(self.base_model or self.agent_name)
+        ):
             try:
                 text, seq_lp, raw_lp, _data = ollama_chat_with_logprobs(
                     model=self.agent_name,
@@ -466,6 +480,20 @@ class LambdaAgent(Agent):
     def get_type(self) -> str:
         return self.type
 
+def openai_chat_completion_model_id(base_model: str) -> str:
+    """
+    Map HASHIRU worker base_model aliases to the OpenAI API ``model`` string.
+
+    Persisted agents may use ``chatgpt-5.4`` (registry / cost table id); the API expects
+    ``gpt-5.4`` (override with HASHIRU_OPENAI_CHATGPT_54_MODEL_ID if OpenAI renames it).
+    """
+    key = (base_model or "").strip().lower()
+    if key == "chatgpt-5.4":
+        override = os.getenv("HASHIRU_OPENAI_CHATGPT_54_MODEL_ID", "").strip()
+        return override or "gpt-5.4"
+    return (base_model or "").strip()
+
+
 class OpenAIAgent(Agent):
     type = "cloud"
 
@@ -487,6 +515,7 @@ class OpenAIAgent(Agent):
                 "Set OPENAI_API_KEY environment variable."
             )
         self.client = OpenAI(api_key=self.api_key)
+        self.openai_api_model = openai_chat_completion_model_id(base_model)
         super().__init__(
             agent_name,
             base_model,
@@ -532,7 +561,7 @@ class OpenAIAgent(Agent):
         ]
         try:
             response = self.client.chat.completions.create(
-                model=self.base_model,
+                model=self.openai_api_model,
                 messages=messages,
                 logprobs=True,
             )
@@ -546,12 +575,12 @@ class OpenAIAgent(Agent):
         except Exception as e:
             logging.getLogger(__name__).warning(
                 "OpenAI logprob chat failed for %s, falling back without logprobs: %s",
-                self.base_model,
+                self.openai_api_model,
                 e,
             )
 
         response = self.client.chat.completions.create(
-            model=self.base_model,
+            model=self.openai_api_model,
             messages=messages,
         )
         return (response.choices[0].message.content or "").strip()
@@ -810,31 +839,31 @@ class AgentManager():
         if not self.is_cloud_invocation_enabled and agent.get_type() == "cloud":
             raise ValueError("Cloud invocation mode is disabled.")
 
-        n_tokens = len(prompt.split())/1000000
+        prompt_mtok = len(prompt.split()) / 1_000_000
 
         self.validate_budget(agent.invoke_resource_cost,
-                             agent.invoke_expense_cost*n_tokens)
+                             agent.invoke_expense_cost * prompt_mtok)
 
         self.budget_manager.add_to_expense_budget(
-            agent.invoke_expense_cost*n_tokens)
+            agent.invoke_expense_cost * prompt_mtok)
 
         result = agent.ask_agent(prompt)
         text, primary_seq_lp = _coerce_agent_reply(result)
-        n_tokens = len((text or "").split()) / 1000000
+        output_mtok = len((text or "").split()) / 1_000_000
         self.budget_manager.add_to_expense_budget(
-            agent.output_expense_cost * n_tokens)
+            agent.output_expense_cost * output_mtok)
 
         # --- Gather extra responses for semantic metrics (same prompt, multiple samples) ---
         samples_for_metrics: list[str] = []
         sample_seq_lps: list[Optional[float]] = []
         ss_temp = semantic_sample_temperature()
         if semantic_metrics_sampling_enabled():
-            for _ in range(NUM_EXTRA_RESPONSES_FOR_SEMANTIC):
+            for _ in range(num_extra_responses_for_semantic()):
                 try:
                     self.validate_budget(agent.invoke_resource_cost,
-                                         agent.invoke_expense_cost * n_tokens)
+                                         agent.invoke_expense_cost * prompt_mtok)
                     self.budget_manager.add_to_expense_budget(
-                        agent.invoke_expense_cost * n_tokens)
+                        agent.invoke_expense_cost * prompt_mtok)
                     extra_result = agent.ask_agent(prompt, temperature=ss_temp)
                     extra_text, extra_lp = _coerce_agent_reply(extra_result)
                     if extra_text and extra_text.strip():
@@ -848,6 +877,13 @@ class AgentManager():
                         "Extra response for semantic metrics failed (will try remaining samples): %s", e
                     )
                     continue
+            if num_extra_responses_for_semantic() > 0 and not samples_for_metrics:
+                self.logger.warning(
+                    "Semantic metrics: zero extra samples collected for agent %s (entropy/density backends "
+                    "may see only one string). Consider HASHIRU_SEMANTIC_EXTRA_SAMPLES, faster worker model, "
+                    "or check Ollama timeouts.",
+                    agent_name,
+                )
 
         # --- Always one gateway call per worker turn when semantic metrics are enabled (may be 0 extra samples). ---
         entropy, density = None, None
@@ -951,11 +987,16 @@ class AgentManager():
             "same_prompt_completion_index_sent_to_ceo": 0,
             "same_prompt_total_llm_completions": 1 + n_aux,
         }
+        if trace_include_semantic_auxiliary_responses():
+            meta["semantic_auxiliary_responses"] = list(samples_for_metrics)
         inv_idx, reprompted = worker_invocation_reprompt_flags(
             agent_name, bool(meta["semantic_quality_concern"])
         )
         meta["worker_invocation_index"] = inv_idx
         meta["worker_reprompted_after_semantic_check"] = reprompted
+        _wa_extras = {}
+        if trace_include_semantic_auxiliary_responses():
+            _wa_extras["semantic_auxiliary_responses"] = list(samples_for_metrics)
         log_orchestration_event(
             "worker_answer",
             worker_routing="AskAgent",
@@ -980,6 +1021,7 @@ class AgentManager():
             semantic_quality_summary=meta["semantic_quality_summary"],
             suggested_ceo_next_steps=meta["suggested_ceo_next_steps"],
             implied_ceo_decision_hint=implied_hint,
+            **_wa_extras,
         )
 
         return (
@@ -1044,7 +1086,7 @@ class AgentManager():
             extra_lps: list[Optional[float]] = []
             if semantic_metrics_sampling_enabled():
                 extra, extra_lps = self.get_agent_responses(
-                    name, prompt, NUM_EXTRA_RESPONSES_FOR_SEMANTIC
+                    name, prompt, num_extra_responses_for_semantic()
                 )
                 all_individual_responses.extend(extra)
                 all_seq_lps.extend(extra_lps)
@@ -1102,6 +1144,9 @@ class AgentManager():
                 if concern_i
                 else "semantic_metrics_acceptable_ceo_may_use_or_finalize"
             )
+            _wam_extras = {}
+            if trace_include_semantic_auxiliary_responses():
+                _wam_extras["semantic_auxiliary_responses"] = list(extra)
             log_orchestration_event(
                 "worker_answer_multi",
                 worker_routing="AskMultipleAgents",
@@ -1124,6 +1169,7 @@ class AgentManager():
                 worker_invocation_index=inv_m,
                 worker_reprompted_after_semantic_check=rep_m,
                 implied_ceo_decision_hint=multi_hint,
+                **_wam_extras,
             )
 
         combined_response = "\n\n".join(
@@ -1158,8 +1204,8 @@ class AgentManager():
                 except Exception as e:
                     self.logger.warning("Semantic metric compute failed for multi-agent: %s", e)
         else:
-            # Default: summarize per-agent metrics to avoid false concern on heterogeneous
-            # sub-tasks that naturally produce diverse outputs.
+            # Mean of per-agent entropy/density is diagnostic only for dashboards; threshold
+            # decisions use each row's semantic_quality_concern (OR across agents), not these means.
             pe_vals = [
                 row.get("semantic_entropy")
                 for row in per_agent_outputs
@@ -1173,6 +1219,18 @@ class AgentManager():
             entropy = (sum(pe_vals) / len(pe_vals)) if pe_vals else None
             density = (sum(pd_vals) / len(pd_vals)) if pd_vals else None
 
+        agents_with_semantic_concern = [
+            str(row["agent_name"])
+            for row in per_agent_outputs
+            if isinstance(row, dict)
+            and row.get("agent_name") is not None
+            and bool(row.get("semantic_quality_concern"))
+        ]
+        aggregate_concern = len(agents_with_semantic_concern) > 0
+        if metric_scope == "global" and entropy is not None and density is not None:
+            if reprompt_triggered(entropy, density):
+                aggregate_concern = True
+
         result_dict = {
             "text": combined_response,
             "combined_output": combined_response,
@@ -1182,6 +1240,8 @@ class AgentManager():
             "semantic_metric_scope": metric_scope,
             "semantic_ablation": flags_dict(),
             "sequence_logprobs": seq_combined,
+            "semantic_quality_concern": aggregate_concern,
+            "agents_with_semantic_concern": agents_with_semantic_concern,
         }
         log_orchestration_event(
             "worker_answers_multi_combined",
@@ -1194,6 +1254,8 @@ class AgentManager():
             semantic_density=density,
             semantic_entropy_threshold=SEMANTIC_ENTROPY_THRESHOLD,
             semantic_density_threshold=SEMANTIC_DENSITY_THRESHOLD,
+            semantic_quality_concern=aggregate_concern,
+            agents_with_semantic_concern=agents_with_semantic_concern,
             per_agent_outputs=per_agent_outputs,
         )
         return (

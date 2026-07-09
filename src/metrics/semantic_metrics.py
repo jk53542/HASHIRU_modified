@@ -56,12 +56,14 @@ def _maybe_trim_for_metrics(text: str) -> str:
 def _build_payload(prompt: str, response: str, samples: list = None, **kwargs) -> dict:
     """Build JSON payload for the metrics service. responses = [response]; samples = [samples] per response."""
     response = _maybe_trim_for_metrics(response or "")
-    trimmed_samples = (
-        [_maybe_trim_for_metrics(s) for s in samples] if samples else None
-    )
+    # Distinguish None (omit samples) from [] (explicit empty list from caller).
+    if samples is None:
+        trimmed_samples = None
+    else:
+        trimmed_samples = [_maybe_trim_for_metrics(s) for s in samples]
     responses = [response]
     # Service expects samples[i] to align with responses[i]. One response -> one list of samples.
-    sample_lists = [list(trimmed_samples)] if trimmed_samples else None
+    sample_lists = [list(trimmed_samples)] if trimmed_samples is not None else None
     metadata: dict = {}
     md = kwargs.get("metadata")
     if isinstance(md, dict):

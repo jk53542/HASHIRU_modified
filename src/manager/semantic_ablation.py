@@ -5,6 +5,12 @@ Entropy / density toggles (default: both on):
   export HASHIRU_ENABLE_SEMANTIC_ENTROPY=0
   export HASHIRU_ENABLE_SEMANTIC_DENSITY=0
 
+When both are off, local Ollama workers skip the HTTP logprobs chat path and use the library
+``ollama.chat`` API instead (avoids HASHIRU_OLLAMA_CHAT_TIMEOUT stalls on long R1-style runs).
+
+Multi-agent tool (default: on). When off, AskMultipleAgents is not exposed to the CEO and calls are rejected:
+  export HASHIRU_ENABLE_ASK_MULTIPLE_AGENTS=0
+
 Thresholds (used only for metrics that remain enabled). When violated, AskAgent returns
 semantic_quality_concern=True so the CEO decides the next step (reprompt, other agent,
 AskMultipleAgents, retire worker, etc.). The worker is NOT auto re-prompted.
@@ -14,6 +20,9 @@ AskMultipleAgents, retire worker, etc.). The worker is NOT auto re-prompted.
 
 Values for enable flags: 1/0, true/false, yes/no, on/off (case-insensitive).
 Empty env = default (enabled for toggles; numeric defaults for thresholds).
+
+Stochastic samples per AskAgent: ``HASHIRU_SEMANTIC_EXTRA_SAMPLES`` (default 4, max 16).
+Long-CoT + HTTP logprobs: ``HASHIRU_OLLAMA_SKIP_HTTP_LOGPROBS_REASONING`` in ``ollama_logprobs.py``.
 """
 from __future__ import annotations
 
@@ -46,6 +55,11 @@ def semantic_entropy_enabled() -> bool:
 
 def semantic_density_enabled() -> bool:
     return _truthy("HASHIRU_ENABLE_SEMANTIC_DENSITY", default=True)
+
+
+def ask_multiple_agents_tool_enabled() -> bool:
+    """Expose and allow the AskMultipleAgents CEO tool (default: enabled)."""
+    return _truthy("HASHIRU_ENABLE_ASK_MULTIPLE_AGENTS", default=True)
 
 
 def semantic_metrics_sampling_enabled() -> bool:
@@ -146,10 +160,21 @@ def ceo_semantic_quality_followup(
     )
     steps = [
         "Reprompt the same agent with clearer instructions or ask for explicit uncertainty handling.",
-        "Use AskMultipleAgents with focused sub-prompts, then synthesize one answer.",
-        "Delegate to a different agent or a better-fit base model.",
-        "If this agent repeatedly crosses thresholds, retire it and recreate with a sharper system prompt.",
     ]
+    if ask_multiple_agents_tool_enabled():
+        steps.append(
+            "Use AskMultipleAgents with focused sub-prompts, then synthesize one answer."
+        )
+    else:
+        steps.append(
+            "Use AskAgent again with a different agent or a tighter sub-prompt (AskMultipleAgents is disabled)."
+        )
+    steps.extend(
+        [
+            "Delegate to a different agent or a better-fit base model.",
+            "If this agent repeatedly crosses thresholds, retire it and recreate with a sharper system prompt.",
+        ]
+    )
     return {
         "semantic_quality_concern": True,
         "semantic_threshold_violations": violations,

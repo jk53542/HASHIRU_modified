@@ -1,4 +1,9 @@
 from src.manager.agent_manager import AgentManager, compact_worker_reply_for_ceo
+from src.manager.ceo_decision_trace import (
+    ask_agent_rationale_properties,
+    ask_agent_rationale_required,
+    extract_ceo_decision_fields,
+)
 from src.manager.orchestration_trace import (
     ceo_worker_round_cap_tool_result,
     ceo_worker_tool_round_cap_reached,
@@ -38,9 +43,10 @@ class AskAgent():
                 "prompt": {
                     "type": "string",
                     "description": "This is the prompt that will be used to ask the agent a question. It should be a string that describes the question to be asked.",
-                }
+                },
+                **ask_agent_rationale_properties(),
             },
-            "required": ["agent_name", "prompt"],
+            "required": ["agent_name", "prompt", *ask_agent_rationale_required()],
         }
     }
 
@@ -74,12 +80,17 @@ class AskAgent():
             f"density_ok={(orch_meta.get('metrics_diagnostics_final') or {}).get('density_ok')!r}"
         )
         concern = bool(orch_meta.get("semantic_quality_concern"))
+        _ceo_ask_extras = {}
+        _sar = orch_meta.get("semantic_auxiliary_responses")
+        if isinstance(_sar, list):
+            _ceo_ask_extras["semantic_auxiliary_responses"] = _sar
         log_orchestration_event(
             "ceo_ask_agent",
             worker_routing="AskAgent",
             phase="after_worker_completion",
             agent_name=agent_name,
             worker_prompt=prompt,
+            **extract_ceo_decision_fields(kwargs),
             worker_response=orch_meta.get("worker_response"),
             worker_response_kind=orch_meta.get("worker_response_kind"),
             semantic_auxiliary_completions_count=orch_meta.get(
@@ -103,6 +114,7 @@ class AskAgent():
             semantic_quality_concern=concern,
             base_model=orch_meta.get("base_model"),
             semantic_ablation=orch_meta.get("semantic_ablation"),
+            **_ceo_ask_extras,
         )
         msg = (
             "Agent replied, but semantic entropy/density crossed thresholds; review semantic_quality_* fields and choose the next action."
@@ -119,6 +131,7 @@ class AskAgent():
                 "semantic_quality_concern": concern,
                 "semantic_entropy": orch_meta.get("semantic_entropy"),
                 "semantic_density": orch_meta.get("semantic_density"),
+                "semantic_quality_summary": orch_meta.get("semantic_quality_summary", ""),
                 "primary_output_excerpt": _clip_text(wr, 12000),
             }
         )

@@ -71,7 +71,7 @@ class GeminiModelManager(AbstractModelManager):
     def __init__(self, api_key):
         super().__init__()
         self.client = genai.Client(api_key=api_key)
-        self.model = "gemini-2.0-flash"
+        self.model = "gemini-2.5-flash"
         # read system prompt from file
         with open(self.system_prompt_file, 'r') as f:
             self.system_instruction = f.read()
@@ -83,7 +83,7 @@ class GeminiModelManager(AbstractModelManager):
 
     def create_model(self, base_model=None, context_window=4096, temperature=0):
         # Initialize the Gemini model settings (if applicable)
-        self.model = base_model if base_model else "gemini-2.0-flash"
+        self.model = base_model if base_model else "gemini-2.5-flash"
 
     def request(self, prompt, temperature=0, context_window=4096):
         # Request response from the Gemini model

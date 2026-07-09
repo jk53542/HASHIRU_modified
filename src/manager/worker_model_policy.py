@@ -16,7 +16,7 @@ Families (case-insensitive):
   ollama, local             — all Ollama worker bases (deepseek-r1, llama3.2, mistral)
   groq                      — Groq cloud workers
   lambda                    — Lambda Labs workers
-  openai, chatgpt           — OpenAI-hosted ChatGPT workers
+  openai, chatgpt           — OpenAI-hosted workers (``chatgpt-5.4`` → API ``gpt-5.4``; override with HASHIRU_OPENAI_CHATGPT_54_MODEL_ID)
   gemini                    — Gemini workers (requires enabling gemini in AgentManager)
 """
 from __future__ import annotations
@@ -31,6 +31,7 @@ _LAMBDA_BASES = frozenset({"lambda-hermes3-8b"})
 _OPENAI_BASES = frozenset({"chatgpt-5.4"})
 _GEMINI_BASES = frozenset(
     {
+        "gemini-2.5-flash",
         "gemini-2.5-flash-preview-05-20",
         "gemini-2.5-pro-exp-03-25",
         "gemini-2.0-flash",

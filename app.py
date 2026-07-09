@@ -188,6 +188,8 @@ def run_model(message, history):
         begin_orchestration_user_turn(
             ctx if ctx is not None else {},
             user_turn_excerpt=excerpt or None,
+            ceo_input_tokens_baseline=model_manager.input_tokens,
+            ceo_output_tokens_baseline=model_manager.output_tokens,
         )
     except Exception:
         clean_text = raw_text
@@ -197,7 +199,12 @@ def run_model(message, history):
             ex = (raw_text or "").strip()
             if len(ex) > 8000:
                 ex = ex[:8000]
-            begin_orchestration_user_turn({}, user_turn_excerpt=ex or None)
+            begin_orchestration_user_turn(
+                {},
+                user_turn_excerpt=ex or None,
+                ceo_input_tokens_baseline=model_manager.input_tokens,
+                ceo_output_tokens_baseline=model_manager.output_tokens,
+            )
         except Exception:
             pass
     if "text" in message:
@@ -238,8 +245,9 @@ no_auth = args.no_auth
 with gr.Blocks(title="HASHIRU AI", css=css, fill_width=True, fill_height=True) as demo:
     # Budget modes disabled by default so budget does not block agent creation or invocation.
     _default_modes = [m for m in Mode if m not in (Mode.ENABLE_RESOURCE_BUDGET, Mode.ENABLE_ECONOMY_BUDGET)]
-    model_manager = GeminiManager(
-        gemini_model="gemini-2.0-flash", modes=_default_modes)
+    # gemini-2.0-flash was shut down 2026-06-01; override via HASHIRU_GEMINI_CEO_MODEL.
+    _ceo_model = os.getenv("HASHIRU_GEMINI_CEO_MODEL", "gemini-2.5-flash").strip()
+    model_manager = GeminiManager(gemini_model=_ceo_model, modes=_default_modes)
     try:
         from src.manager.orchestration_trace import init_orchestration_trace_session
 

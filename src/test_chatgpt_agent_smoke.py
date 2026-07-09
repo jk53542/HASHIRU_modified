@@ -24,10 +24,22 @@ def _assert(condition: bool, message: str) -> None:
 
 
 def main() -> int:
-    from src.manager.agent_manager import AgentManager
+    from src.manager.agent_manager import AgentManager, openai_chat_completion_model_id
     from src.tools.default_tools.agent_cost_manager import AgentCostManager
 
     print("[chatgpt-smoke] Starting ChatGPT worker smoke test...")
+
+    # 0) API model id alias (registry id vs OpenAI ``model`` parameter)
+    mapped = openai_chat_completion_model_id("chatgpt-5.4")
+    _assert(
+        mapped == "gpt-5.4",
+        f"Expected chatgpt-5.4 -> gpt-5.4 for API, got {mapped!r}",
+    )
+    _assert(
+        openai_chat_completion_model_id("gpt-5.4") == "gpt-5.4",
+        "gpt-5.4 should pass through unchanged",
+    )
+    print("[chatgpt-smoke] API model alias OK: chatgpt-5.4 -> gpt-5.4")
 
     # 1) Routing check
     am = AgentManager()

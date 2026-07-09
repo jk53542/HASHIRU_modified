@@ -41,6 +41,9 @@ best prior output instead of invoking models. See ``src/manager/ceo_worker_round
 Each ``worker_answer`` / ``worker_answer_multi`` includes ``worker_response`` (the **primary**
 completion only—the one returned to the CEO for that tool call). Entropy/density may use
 additional **same-prompt** stochastic completions; those are **not** logged as separate trace rows.
+Optional: set ``HASHIRU_TRACE_SEMANTIC_AUXILIARY_RESPONSES=1`` to also record the texts of those
+auxiliary samples in fields ``semantic_auxiliary_responses`` (list of strings, each truncated in the
+JSONL writer). Default is **off** to keep traces small.
 The text the CEO sees for that ``AskAgent`` call is **always** the first completion (index **0**):
 ``same_prompt_completion_index_sent_to_ceo`` is always ``0`` and ``worker_response`` matches the
 tool output. ``same_prompt_total_llm_completions`` is ``1 + semantic_auxiliary_completions_count``.
@@ -51,12 +54,35 @@ the original benchmark question.
 Each line also carries ``semantic_entropy`` / ``semantic_density``, threshold fields, and
 ``implied_ceo_decision_hint`` summarizing whether the CEO *should* re-evaluate or may proceed.
 
+``ceo_final_answer`` is emitted once per completed CEO turn when ``invoke_manager`` stops recursing
+(no further tool rounds in that branch). ``ceo_final_answer`` is the same string benchmarks use as
+``agent_final_response`` (last assistant ``content`` in history, matching
+``get_last_assistant_content`` in jailbreakbench). It is present even when the model only returned
+tool calls in the last stream chunk (then the logged text may be an earlier assistant message or
+empty if history ends on tool/user turns).
+
+**CEO token fields** on ``ceo_final_answer`` (from ``GeminiManager`` counters): ``ceo_session_input_tokens`` /
+``ceo_session_output_tokens`` are cumulative for the process since manager construction. When the UI
+calls ``begin_orchestration_user_turn`` with ``ceo_input_tokens_baseline`` / ``ceo_output_tokens_baseline``
+(Gradio does this before each user message), the same row also includes ``ceo_turn_delta_input_tokens`` /
+``ceo_turn_delta_output_tokens`` for that question/turn. **Input** totals are dominated by Gemini
+``count_tokens`` on each CEO ``generate_content`` request; **output** totals use the same heuristics
+as budgeting (word-split counts on streamed text and ``repr`` splits on tool payloads)—not worker
+model usage tokens.
+
 On ``ceo_tool_finished`` for worker tools: ``worker_routing`` is ``AskAgent`` (one worker per tool
 call) or ``AskMultipleAgents`` (several workers in one tool call). ``worker_subcalls_this_tool`` is
 the number of worker completions in that tool call (1 for AskAgent; for AskMultipleAgents, the
 length of ``subcall_agent_names``, which lists one name per subcall and may repeat the same agent).
 ``called_agent_names`` remains de-duplicated for quick scanning. ``worker_response`` is duplicated
 on ``ceo_tool_finished`` for ``AskAgent`` when available.
+
+**CEO decision trace (``ceo_decision``):** logged immediately *before* each delegation tool
+(``AskAgent``, ``AskMultipleAgents``, ``AgentCreator``, ``FireAgent``) with required rationale
+fields from the tool call (``ceo_rationale``, ``agent_selection_rationale``,
+``labor_division_rationale``, etc.) plus ``prior_semantic_context`` summarizing recent worker
+entropy/density concerns. ``ceo_final_answer`` may include ``ceo_synthesis_rationale`` when the CEO
+prefixes it with ``CEO_SYNTHESIS_RATIONALE:`` and ``ceo_decision_history`` for the turn.
 
 Call ``init_orchestration_trace_session()`` once at app startup (optional but recommended) to emit
 ``trace_session_start`` and create the per-session file immediately.
@@ -94,6 +120,10 @@ _ALLOWED_TRACE_CTX_KEYS = frozenset(
 )
 _logger = logging.getLogger(__name__)
 
+# When tracing auxiliary semantic samples as text, cap list length and per-string size in JSONL.
+_TRACE_AUX_RESPONSES_MAX_ITEMS = 32
+_TRACE_AUX_RESPONSES_STR_LIMIT = 12000
+
 _session_lock = threading.Lock()
 # Resolved absolute path to the active JSONL file; None = not yet resolved; "" = tracing disabled
 _trace_abs_path: str | None = None
@@ -107,6 +137,15 @@ def trace_path() -> str | None:
         return None
     p = os.path.normpath(os.path.expandvars(os.path.expanduser(raw)))
     return p or None
+
+
+def trace_include_semantic_auxiliary_responses() -> bool:
+    """
+    When true, worker trace events may include ``semantic_auxiliary_responses`` (texts of
+    same-prompt stochastic samples used for entropy/density). Default false.
+    """
+    v = os.environ.get("HASHIRU_TRACE_SEMANTIC_AUXILIARY_RESPONSES", "").strip().lower()
+    return v in ("1", "true", "yes", "on")
 
 
 def _explicit_jsonl_file(configured: str) -> bool:
@@ -212,6 +251,10 @@ def _default_turn_state() -> dict[str, Any]:
         # AskAgent + AskMultipleAgents completions this user turn (see ceo_worker_round_policy).
         "ceo_worker_tool_rounds_completed": 0,
         "ceo_worker_round_history": [],
+        "ceo_decision_history": [],
+        # GeminiManager counters at turn start (optional; enables per-question deltas on ceo_final_answer).
+        "ceo_input_tokens_baseline": None,
+        "ceo_output_tokens_baseline": None,
     }
 
 
@@ -226,11 +269,16 @@ def begin_orchestration_user_turn(
     meta: dict[str, Any] | None = None,
     *,
     user_turn_excerpt: str | None = None,
+    ceo_input_tokens_baseline: int | None = None,
+    ceo_output_tokens_baseline: int | None = None,
 ) -> None:
     """
     Reset orchestration state for one CEO user turn (one Gradio user message).
     Optionally set benchmark_* fields copied into every trace line until the next turn.
     Pass ``user_turn_excerpt`` with the CEO-visible user text (prefix already stripped).
+
+    Pass ``ceo_*_tokens_baseline`` from ``GeminiManager.input_tokens`` / ``output_tokens`` immediately
+    before handling the user message so ``ceo_final_answer`` rows can record per-turn deltas.
     """
     st = _default_turn_state()
     if meta:
@@ -244,6 +292,16 @@ def begin_orchestration_user_turn(
             pass
     if user_turn_excerpt:
         st["user_turn_excerpt"] = user_turn_excerpt.strip()[:8000]
+    if ceo_input_tokens_baseline is not None:
+        try:
+            st["ceo_input_tokens_baseline"] = int(ceo_input_tokens_baseline)
+        except (TypeError, ValueError):
+            pass
+    if ceo_output_tokens_baseline is not None:
+        try:
+            st["ceo_output_tokens_baseline"] = int(ceo_output_tokens_baseline)
+        except (TypeError, ValueError):
+            pass
     _orch_turn.set(st)
     _orch_turn_tls.turn = st
 
@@ -289,6 +347,34 @@ def _turn_context_trace_fields() -> dict[str, Any]:
     ex = st.get("user_turn_excerpt")
     if ex:
         out["user_turn_excerpt"] = ex
+    return out
+
+
+def ceo_token_fields_for_final_answer(
+    session_input_tokens: int,
+    session_output_tokens: int,
+) -> dict[str, Any]:
+    """
+    Fields appended to ``ceo_final_answer`` trace rows. Session totals are always emitted;
+    per-turn deltas appear when ``begin_orchestration_user_turn`` recorded baselines.
+    """
+    out: dict[str, Any] = {
+        "ceo_session_input_tokens": int(session_input_tokens),
+        "ceo_session_output_tokens": int(session_output_tokens),
+    }
+    st = _get_turn_state()
+    if not st:
+        return out
+    bi = st.get("ceo_input_tokens_baseline")
+    bo = st.get("ceo_output_tokens_baseline")
+    if bi is not None:
+        out["ceo_turn_delta_input_tokens"] = max(0, int(session_input_tokens) - int(bi))
+    if bo is not None:
+        out["ceo_turn_delta_output_tokens"] = max(0, int(session_output_tokens) - int(bo))
+    if bi is not None and bo is not None:
+        out["ceo_turn_delta_total_tokens"] = out["ceo_turn_delta_input_tokens"] + out[
+            "ceo_turn_delta_output_tokens"
+        ]
     return out
 
 
@@ -589,6 +675,37 @@ def log_orchestration_event(event: str, **fields: Any) -> None:
         for k, v in fields.items():
             if k == "worker_response" and isinstance(v, str):
                 rec[k] = _truncate(v, limit=50000)
+            elif k == "ceo_final_answer" and isinstance(v, str):
+                rec[k] = _truncate(v, limit=50000)
+            elif k in (
+                "ceo_rationale",
+                "agent_selection_rationale",
+                "labor_division_rationale",
+                "creation_rationale",
+                "retirement_rationale",
+                "semantic_metrics_influence",
+                "ceo_synthesis_rationale",
+                "last_round_semantic_quality_summary",
+            ) and isinstance(v, str):
+                rec[k] = _truncate(v, limit=16000)
+            elif k == "ceo_decision_history" and isinstance(v, list):
+                rec[k] = [
+                    _truncate(x, limit=4000, nested_str_limit=16000)
+                    if isinstance(x, dict)
+                    else _truncate(x, limit=4000)
+                    for x in v[:24]
+                ]
+            elif k == "prior_semantic_context" and isinstance(v, dict):
+                rec[k] = _truncate(v, limit=4000, nested_str_limit=16000)
+            elif k == "semantic_auxiliary_responses" and isinstance(v, list):
+                rec[k] = [
+                    _truncate(str(x), limit=_TRACE_AUX_RESPONSES_STR_LIMIT)
+                    for x in v[:_TRACE_AUX_RESPONSES_MAX_ITEMS]
+                ]
+                if len(v) > _TRACE_AUX_RESPONSES_MAX_ITEMS:
+                    rec[k].append(
+                        f"...<{len(v) - _TRACE_AUX_RESPONSES_MAX_ITEMS} more samples omitted>"
+                    )
             elif k == "per_agent_outputs":
                 rec[k] = _truncate_per_agent_outputs(v)
             else:
